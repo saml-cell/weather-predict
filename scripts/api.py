@@ -80,9 +80,15 @@ def invalidate_forecast_cache(city_name=None):
 # ---------------------------------------------------------------------------
 # Static frontend
 # ---------------------------------------------------------------------------
+_STATUS_DIR = os.path.join(os.path.expanduser("~"), ".openclaw", "workspace", "dashboard")
+
 @app.route("/")
 def serve_index():
     return send_from_directory(_DASHBOARD_DIR, "index.html")
+
+@app.route("/status")
+def serve_status():
+    return send_from_directory(_STATUS_DIR, "status.html")
 
 @app.route("/<path:path>")
 def serve_static(path):

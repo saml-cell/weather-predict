@@ -455,45 +455,170 @@ def format_indices(indices_data):
     return "\n".join(lines)
 
 
+def _get_university_deadlines():
+    """Read UNIVERSITY.md and find upcoming deadlines."""
+    uni_path = os.path.expanduser("~/.openclaw/workspace/UNIVERSITY.md")
+    if not os.path.exists(uni_path):
+        return []
+
+    from datetime import date
+    today = date.today()
+    deadlines = []
+
+    try:
+        with open(uni_path) as f:
+            in_table = False
+            for line in f:
+                line = line.strip()
+                if line.startswith("| Due Date"):
+                    in_table = True
+                    continue
+                if in_table and line.startswith("|---"):
+                    continue
+                if in_table and line.startswith("|"):
+                    parts = [p.strip() for p in line.split("|")[1:-1]]
+                    if len(parts) >= 4 and parts[0] and parts[3].lower() not in ("done", "submitted", "hotovo"):
+                        try:
+                            due = date.fromisoformat(parts[0])
+                            days_left = (due - today).days
+                            if -1 <= days_left <= 7:
+                                deadlines.append({
+                                    "due": parts[0],
+                                    "course": parts[1],
+                                    "assignment": parts[2],
+                                    "days_left": days_left,
+                                })
+                        except ValueError:
+                            pass
+                elif in_table and not line.startswith("|"):
+                    in_table = False
+    except OSError:
+        pass
+
+    return sorted(deadlines, key=lambda d: d["days_left"])
+
+
+def _get_budget_status():
+    """Read model-switcher state for budget info."""
+    state_path = os.path.expanduser("~/.openclaw/workspace/state/model-switcher.json")
+    try:
+        with open(state_path) as f:
+            state = json.load(f)
+        return {
+            "model": state.get("model_name", "?"),
+            "budget_pct": state.get("budget_pct", 0),
+            "days_left": state.get("days_left", 0),
+            "daily_spend": state.get("daily", {}).get("spend", 0),
+            "daily_budget": state.get("daily_budget", 0.667),
+        }
+    except (OSError, json.JSONDecodeError):
+        return None
+
+
 def format_morning_briefing():
-    """Morning briefing — Bratislava + alerts + all cities summary."""
+    """Combined morning briefing — weather + deadlines + budget in one message."""
+    from datetime import date
     now = datetime.now(timezone.utc)
+    today = date.today()
+
+    DAY_NAMES = {0: "Pondelok", 1: "Utorok", 2: "Streda", 3: "Štvrtok",
+                 4: "Piatok", 5: "Sobota", 6: "Nedeľa"}
+    day_name = DAY_NAMES.get(today.weekday(), "")
 
     lines = [
-        f"☀️ *Ranný prehľad počasia*",
-        f"📅 {now.strftime('%d.%m.%Y')}",
+        f"🦞 *Dobré ráno, Sam!*",
+        f"📅 {day_name} {today.strftime('%d.%m.%Y')}",
         "━━━━━━━━━━━━━━━━━━━━",
-        "",
     ]
 
-    # Bratislava detailed forecast
+    # --- UNIVERSITY DEADLINES ---
+    deadlines = _get_university_deadlines()
+    if deadlines:
+        lines.append("")
+        lines.append("📚 *Deadliny:*")
+        for dl in deadlines:
+            if dl["days_left"] <= 0:
+                emoji = "🔴"
+                when = "DNES!"
+            elif dl["days_left"] == 1:
+                emoji = "🟠"
+                when = "ZAJTRA!"
+            elif dl["days_left"] <= 3:
+                emoji = "🟡"
+                when = f"o {dl['days_left']} dni"
+            else:
+                emoji = "🔵"
+                when = f"o {dl['days_left']} dní"
+            lines.append(f"  {emoji} {dl['assignment']} ({dl['course']}) — {when}")
+
+    # --- WEATHER ---
+    lines.append("")
     cities = get_cities()
     ba_city = next((c for c in cities if "bratislava" in c["name"].lower()), None)
 
     if ba_city:
         fc = get_forecast(ba_city["id"])
-        detail = format_city_forecast(fc)
-        if detail:
-            lines.append(detail)
-            lines.append("")
+        if fc and "error" not in fc:
+            cur = fc["current"]
+            today_fc = fc.get("daily", [{}])[0]
+            tmrw_fc = fc["daily"][1] if len(fc.get("daily", [])) > 1 else {}
 
-    # Other cities compact
+            high = today_fc.get("weighted_high_c", "?")
+            low = today_fc.get("weighted_low_c", "?")
+            precip = today_fc.get("adjusted_precip_prob") or today_fc.get("weighted_precip_prob")
+            precip_str = f"{precip:.0f}%" if precip is not None else "?"
+            cond = today_fc.get("weighted_condition", "?")
+            cond_emoji = CONDITION_EMOJI.get(cond, "🌡️")
+
+            lines.append(f"{cond_emoji} *Bratislava:* {cur.get('temp_c', '?')}°C teraz")
+            lines.append(f"  Dnes: ↑{high}°C ↓{low}°C | Dážď: {precip_str}")
+
+            if tmrw_fc:
+                t_high = tmrw_fc.get("weighted_high_c", "?")
+                t_precip = tmrw_fc.get("adjusted_precip_prob") or tmrw_fc.get("weighted_precip_prob")
+                t_precip_str = f"{t_precip:.0f}%" if t_precip is not None else "?"
+                lines.append(f"  Zajtra: ↑{t_high}°C | Dážď: {t_precip_str}")
+
+    # Other cities (compact, one line)
     other_cities = [c for c in cities if ba_city and c["id"] != ba_city["id"]]
     if other_cities:
-        lines.append("📋 *Ostatné mestá:*")
-        for city in other_cities:
-            fc = get_forecast(city["id"])
-            compact = format_compact(fc)
-            if compact:
-                lines.append(compact)
         lines.append("")
+        other_parts = []
+        for city in other_cities[:6]:  # Max 6 to keep it short
+            fc = get_forecast(city["id"])
+            if fc and "error" not in fc:
+                cur = fc["current"]
+                name = city["name"]
+                if len(name) > 8:
+                    name = name[:7] + "."
+                other_parts.append(f"{name} {cur.get('temp_c', '?')}°C")
+        if other_parts:
+            lines.append("🌍 " + " | ".join(other_parts))
 
     # Alerts
     alerts_data = get_alerts()
     if alerts_data and alerts_data.get("alerts"):
-        lines.append(format_alerts(alerts_data))
-    else:
-        lines.append("✅ Žiadne výstrahy.")
+        lines.append("")
+        for a in alerts_data["alerts"][:3]:  # Max 3
+            type_emoji = {"extreme_heat": "🔥", "extreme_cold": "🥶",
+                          "heavy_precip": "🌊", "strong_wind": "💨"}.get(a.get("type", ""), "⚠️")
+            lines.append(f"{type_emoji} {a['city']}: {a['message']}")
+
+    # --- BUDGET ---
+    budget = _get_budget_status()
+    if budget:
+        lines.append("")
+        b_pct = budget["budget_pct"] * 100
+        if b_pct < 10:
+            b_emoji = "🔴"
+        elif b_pct < 30:
+            b_emoji = "🟡"
+        else:
+            b_emoji = "🟢"
+        lines.append(f"{b_emoji} Model: {budget['model']} | Budget: {b_pct:.0f}% | {budget['days_left']:.0f}d left")
+
+    lines.append("")
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
 
     return "\n".join(lines)
 
