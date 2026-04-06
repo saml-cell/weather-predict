@@ -10,6 +10,9 @@ Usage:
   python3 scripts/weather_telegram.py --all
   python3 scripts/weather_telegram.py --alerts
   python3 scripts/weather_telegram.py --morning        # Morning briefing
+  python3 scripts/weather_telegram.py --seasonal Bratislava     # 3-month outlook
+  python3 scripts/weather_telegram.py --seasonal Bratislava --months 6
+  python3 scripts/weather_telegram.py --indices        # Climate index state
   python3 scripts/weather_telegram.py --send --city Bratislava  # Send via Telegram
 """
 
@@ -40,6 +43,38 @@ DAY_NAMES_SK = {
 
 CONFIDENCE_SK = {"HIGH": "VYSOKÁ", "MODERATE": "STREDNÁ", "LOW": "NÍZKA"}
 
+MONTH_NAMES_SK = [
+    "", "Január", "Február", "Marec", "Apríl", "Máj", "Jún",
+    "Júl", "August", "September", "Október", "November", "December",
+]
+
+INDEX_NAMES = {
+    "oni": "ENSO (ONI)", "nao": "NAO", "ao": "AO", "pdo": "PDO",
+    "amo": "AMO", "pna": "PNA", "soi": "SOI", "qbo": "QBO",
+    "ea": "East Atlantic", "scand": "Scandinavia", "dmi": "IOD (DMI)",
+    "nino34": "NINO 3.4", "wp": "West Pacific", "tnh": "TNH",
+    "aao": "AAO/SAM", "tna": "TNA", "tsa": "TSA", "np": "North Pacific",
+}
+
+PHASE_SK = {
+    "strong_el_nino": "Silný El Niño",
+    "moderate_el_nino": "Stredný El Niño",
+    "weak_el_nino": "Slabý El Niño",
+    "neutral": "Neutrálny",
+    "weak_la_nina": "Slabá La Niña",
+    "moderate_la_nina": "Stredná La Niña",
+    "strong_la_nina": "Silná La Niña",
+    "positive": "Pozitívny",
+    "negative": "Negatívny",
+    "warm": "Teplý",
+    "cool": "Studený",
+    "westerly": "Západný",
+    "easterly": "Východný",
+    "unknown": "Neznámy",
+}
+
+TERCILE_EMOJI = {"below": "🔵", "near": "⚪", "above": "🔴"}
+
 
 def api_get(path):
     """Fetch JSON from the weather API."""
@@ -63,6 +98,16 @@ def get_forecast(city_id):
 def get_alerts():
     """Get all weather alerts."""
     return api_get("/api/alerts")
+
+
+def get_seasonal(city_id, months=3):
+    """Get seasonal forecast for a city."""
+    return api_get(f"/api/seasonal/{city_id}?months={months}")
+
+
+def get_indices():
+    """Get current climate index state."""
+    return api_get("/api/indices")
 
 
 def format_city_forecast(forecast):
@@ -170,6 +215,246 @@ def format_alerts(alerts_data):
     return "\n".join(lines)
 
 
+def format_seasonal(seasonal_data, city_name):
+    """Format seasonal forecast for Telegram (Slovak)."""
+    if not seasonal_data or "error" in seasonal_data:
+        return f"❌ Sezónna predpoveď pre {city_name} nie je dostupná."
+
+    forecasts = seasonal_data.get("monthly_forecasts", [])
+    index_state = seasonal_data.get("index_state", {})
+    months_ahead = seasonal_data.get("months_ahead", 3)
+
+    lines = [
+        f"📅 *Sezónna predpoveď — {city_name}*",
+        f"🔮 Výhľad na {months_ahead} mesiacov",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+
+    # Key climate drivers
+    drivers = []
+    oni = index_state.get("oni", {})
+    if oni and oni.get("phase", "neutral") != "neutral":
+        phase_sk = PHASE_SK.get(oni["phase"], oni["phase"])
+        drivers.append(f"ENSO: {phase_sk} ({oni['value']:+.1f})")
+
+    nao = index_state.get("nao", {})
+    if nao and nao.get("phase", "neutral") != "neutral":
+        phase_sk = PHASE_SK.get(nao["phase"], nao["phase"])
+        drivers.append(f"NAO: {phase_sk} ({nao['value']:+.1f})")
+
+    ao = index_state.get("ao", {})
+    if ao and ao.get("phase", "neutral") != "neutral":
+        phase_sk = PHASE_SK.get(ao["phase"], ao["phase"])
+        drivers.append(f"AO: {phase_sk} ({ao['value']:+.1f})")
+
+    pdo = index_state.get("pdo", {})
+    if pdo and pdo.get("phase", "neutral") != "neutral":
+        phase_sk = PHASE_SK.get(pdo["phase"], pdo["phase"])
+        drivers.append(f"PDO: {phase_sk}")
+
+    if drivers:
+        lines.append("🌊 *Hlavné klimatické signály:*")
+        for d in drivers:
+            lines.append(f"  • {d}")
+        lines.append("")
+
+    # Monthly table
+    lines.append("📊 *Mesačný výhľad:*")
+    lines.append("")
+
+    for fc in forecasts:
+        m = fc.get("target_month", 0)
+        y = fc.get("target_year", 0)
+        month_name = MONTH_NAMES_SK[m] if 1 <= m <= 12 else str(m)
+
+        temp_anom = fc.get("temp_anomaly_c")
+        precip_anom = fc.get("precip_anomaly_pct")
+        conf = fc.get("confidence", 0)
+
+        # Temperature anomaly with emoji
+        if temp_anom is not None:
+            if temp_anom > 0.5:
+                temp_emoji = "🔴"
+                temp_word = "teplejší"
+            elif temp_anom < -0.5:
+                temp_emoji = "🔵"
+                temp_word = "chladnejší"
+            else:
+                temp_emoji = "⚪"
+                temp_word = "normálny"
+            temp_str = f"{temp_emoji} {temp_anom:+.1f}°C ({temp_word})"
+        else:
+            temp_str = "⚪ N/A"
+
+        # Precipitation anomaly
+        if precip_anom is not None:
+            if precip_anom > 10:
+                precip_emoji = "💧"
+                precip_word = "vlhkejší"
+            elif precip_anom < -10:
+                precip_emoji = "☀️"
+                precip_word = "suchší"
+            else:
+                precip_emoji = "⚪"
+                precip_word = "normálny"
+            precip_str = f"{precip_emoji} {precip_anom:+.0f}% ({precip_word})"
+        else:
+            precip_str = "⚪ N/A"
+
+        # Confidence
+        if conf >= 0.6:
+            conf_str = "🟢 vysoká"
+        elif conf >= 0.3:
+            conf_str = "🟡 stredná"
+        else:
+            conf_str = "🔴 nízka"
+
+        lines.append(f"*{month_name} {y}*")
+        lines.append(f"  🌡️ Teplota: {temp_str}")
+        lines.append(f"  🌧️ Zrážky: {precip_str}")
+        lines.append(f"  🎯 Dôvera: {conf_str}")
+
+        # Tercile probabilities
+        tp = fc.get("tercile_probs", {})
+        bn = tp.get("below_normal", 0.333)
+        nn = tp.get("near_normal", 0.334)
+        an = tp.get("above_normal", 0.333)
+        lines.append(f"  📊 Pod: {bn*100:.0f}% | Norma: {nn*100:.0f}% | Nad: {an*100:.0f}%")
+
+        # Method info
+        methods_used = fc.get("methods_used", 0)
+        method_weights = fc.get("method_weights", {})
+        if method_weights:
+            methods_str = ", ".join(f"{k}: {v*100:.0f}%" for k, v in method_weights.items())
+            lines.append(f"  🔬 Metódy ({methods_used}): {methods_str}")
+
+        # Individual method details (show notable ones)
+        for im in fc.get("individual_methods", []):
+            if im.get("error"):
+                continue
+            method = im.get("method", "")
+            if method == "composite" and im.get("phase_description"):
+                lines.append(f"  📋 Kompozit: {im['phase_description']}")
+                if im.get("sample_years"):
+                    years_str = ", ".join(str(y) for y in im["sample_years"][:5])
+                    lines.append(f"     Podobné roky: {years_str}...")
+            elif method == "ecmwf_seas5" and im.get("temp_anomaly_c") is not None:
+                lines.append(f"  🛰️ ECMWF: {im['temp_anomaly_c']:+.1f}°C, zrážky {im.get('precip_anomaly_pct', 0):+.0f}%")
+
+        lines.append("")
+
+    # Analysis summary
+    lines.append("━━━━━━━━━━━━━━━━━━━━")
+    lines.append("📝 *Analýza:*")
+
+    analysis_parts = []
+
+    # Temperature trend
+    temp_anoms = [fc.get("temp_anomaly_c") for fc in forecasts if fc.get("temp_anomaly_c") is not None]
+    if temp_anoms:
+        avg_temp = sum(temp_anoms) / len(temp_anoms)
+        if avg_temp > 0.5:
+            analysis_parts.append(f"Celkový teplotný trend: teplejší ako normál ({avg_temp:+.1f}°C)")
+        elif avg_temp < -0.5:
+            analysis_parts.append(f"Celkový teplotný trend: chladnejší ako normál ({avg_temp:+.1f}°C)")
+        else:
+            analysis_parts.append("Teploty blízko normálu")
+
+    # Precipitation trend
+    precip_anoms = [fc.get("precip_anomaly_pct") for fc in forecasts if fc.get("precip_anomaly_pct") is not None]
+    if precip_anoms:
+        avg_precip = sum(precip_anoms) / len(precip_anoms)
+        if avg_precip > 10:
+            analysis_parts.append(f"Zrážky nadnormálne ({avg_precip:+.0f}%)")
+        elif avg_precip < -10:
+            analysis_parts.append(f"Zrážky podnormálne ({avg_precip:+.0f}%)")
+        else:
+            analysis_parts.append("Zrážky blízko normálu")
+
+    # ENSO context
+    if oni and oni.get("phase", "neutral") != "neutral":
+        phase_sk = PHASE_SK.get(oni["phase"], oni["phase"])
+        analysis_parts.append(f"ENSO v fáze {phase_sk} — ovplyvňuje globálnu cirkuláciu")
+
+    # NAO for Europe
+    if nao and nao.get("value") is not None:
+        val = nao["value"]
+        if val > 1.0:
+            analysis_parts.append("Silné pozitívne NAO — mierne veterné zimy v sev. Európe")
+        elif val < -1.0:
+            analysis_parts.append("Silné negatívne NAO — blokácie, chladný vzduch nad Európou")
+
+    # AO context
+    if ao and ao.get("value") is not None:
+        val = ao["value"]
+        if val > 1.0:
+            analysis_parts.append("Pozitívny AO — silný polárny vortex, mierne stredné šírky")
+        elif val < -1.0:
+            analysis_parts.append("Negatívny AO — slabý polárny vortex, riziko vpádov studeného vzduchu")
+
+    for part in analysis_parts:
+        lines.append(f"  • {part}")
+
+    return "\n".join(lines)
+
+
+def format_indices(indices_data):
+    """Format climate indices state for Telegram (Slovak)."""
+    if not indices_data or "error" in indices_data:
+        return "❌ Klimatické indexy nie sú dostupné."
+
+    indices = indices_data.get("indices", {})
+    last_updated = indices_data.get("last_updated", "?")
+
+    lines = [
+        "🌊 *Klimatické telekonekčné indexy*",
+        "━━━━━━━━━━━━━━━━━━━━",
+        "",
+    ]
+
+    # Tier 1 - most important
+    lines.append("*Hlavné indexy:*")
+    tier1 = ["oni", "nao", "ao", "pdo", "amo", "pna", "soi"]
+    for idx_name in tier1:
+        info = indices.get(idx_name)
+        if not info:
+            continue
+        name = INDEX_NAMES.get(idx_name, idx_name.upper())
+        val = info.get("value", 0)
+        phase = PHASE_SK.get(info.get("phase", ""), info.get("phase", ""))
+        ym = f"{info.get('year', '?')}-{info.get('month', '?'):02d}" if isinstance(info.get('month'), int) else "?"
+
+        # Signal strength indicator
+        abs_val = abs(val)
+        if abs_val > 1.5:
+            strength = "🔴"
+        elif abs_val > 0.5:
+            strength = "🟡"
+        else:
+            strength = "🟢"
+
+        lines.append(f"  {strength} {name}: {val:+.2f} ({phase}) [{ym}]")
+
+    # Tier 2 - secondary
+    lines.append("")
+    lines.append("*Doplnkové indexy:*")
+    tier2 = ["qbo", "ea", "scand", "dmi", "wp"]
+    for idx_name in tier2:
+        info = indices.get(idx_name)
+        if not info:
+            continue
+        name = INDEX_NAMES.get(idx_name, idx_name.upper())
+        val = info.get("value", 0)
+        phase = PHASE_SK.get(info.get("phase", ""), info.get("phase", ""))
+        lines.append(f"  • {name}: {val:+.2f} ({phase})")
+
+    lines.append("")
+    lines.append(f"🕐 Posledná aktualizácia: {last_updated[:16] if last_updated else '?'}")
+
+    return "\n".join(lines)
+
+
 def format_morning_briefing():
     """Morning briefing — Bratislava + alerts + all cities summary."""
     now = datetime.now(timezone.utc)
@@ -231,32 +516,66 @@ def load_telegram_config():
 
 
 def send_telegram(text, parse_mode="Markdown"):
-    """Send a message via OpenClaw's Telegram bot."""
+    """Send a message via OpenClaw's Telegram bot.
+    Falls back to plain text if Markdown fails.
+    Splits long messages into chunks (Telegram limit: 4096 chars).
+    """
     token, chat_id = load_telegram_config()
     if not token or not chat_id:
         print("ERROR: Could not load Telegram config from OpenClaw")
         return False
 
     url = f"https://api.telegram.org/bot{token}/sendMessage"
-    payload = json.dumps({
-        "chat_id": chat_id,
-        "text": text,
-        "parse_mode": parse_mode,
-    }).encode()
 
-    try:
-        req = Request(url, data=payload, headers={"Content-Type": "application/json"})
-        with urlopen(req, timeout=10) as resp:
-            result = json.loads(resp.read().decode())
-            if result.get("ok"):
-                print(f"Sent to Telegram (chat {chat_id})")
-                return True
-            else:
-                print(f"Telegram error: {result}")
-                return False
-    except Exception as e:
-        print(f"Telegram send failed: {e}")
-        return False
+    # Split long messages
+    chunks = []
+    if len(text) > 4000:
+        lines = text.split("\n")
+        chunk = []
+        chunk_len = 0
+        for line in lines:
+            if chunk_len + len(line) + 1 > 3900 and chunk:
+                chunks.append("\n".join(chunk))
+                chunk = []
+                chunk_len = 0
+            chunk.append(line)
+            chunk_len += len(line) + 1
+        if chunk:
+            chunks.append("\n".join(chunk))
+    else:
+        chunks = [text]
+
+    success = True
+    for chunk in chunks:
+        payload = json.dumps({
+            "chat_id": chat_id,
+            "text": chunk,
+            "parse_mode": parse_mode,
+        }).encode()
+
+        try:
+            req = Request(url, data=payload, headers={"Content-Type": "application/json"})
+            with urlopen(req, timeout=10) as resp:
+                result = json.loads(resp.read().decode())
+                if not result.get("ok"):
+                    raise Exception(f"API error: {result}")
+        except Exception:
+            # Fallback: retry without Markdown parsing
+            payload_plain = json.dumps({
+                "chat_id": chat_id,
+                "text": chunk,
+            }).encode()
+            try:
+                req = Request(url, data=payload_plain, headers={"Content-Type": "application/json"})
+                with urlopen(req, timeout=10) as resp:
+                    json.loads(resp.read().decode())
+            except Exception as e:
+                print(f"Telegram send failed: {e}")
+                success = False
+
+    if success:
+        print(f"Sent to Telegram (chat {chat_id})")
+    return success
 
 
 # ---------------------------------------------------------------------------
@@ -268,6 +587,12 @@ def main():
     parser.add_argument("--all", action="store_true", help="Summary of all cities")
     parser.add_argument("--alerts", action="store_true", help="Show alerts only")
     parser.add_argument("--morning", action="store_true", help="Full morning briefing")
+    parser.add_argument("--seasonal", metavar="CITY",
+                        help="Seasonal outlook for a city (1-12 months)")
+    parser.add_argument("--months", type=int, default=3,
+                        help="Months ahead for seasonal forecast (default: 3)")
+    parser.add_argument("--indices", action="store_true",
+                        help="Show current climate index state")
     parser.add_argument("--send", action="store_true",
                         help="Send to Telegram (via OpenClaw bot)")
     args = parser.parse_args()
@@ -284,6 +609,18 @@ def main():
     # Generate output
     if args.morning:
         output = format_morning_briefing()
+    elif args.seasonal:
+        cities = get_cities()
+        match = next((c for c in cities if args.seasonal.lower() in c["name"].lower()), None)
+        if not match:
+            output = f"❌ Mesto '{args.seasonal}' nie je sledované."
+        else:
+            months = max(1, min(12, args.months))
+            data = get_seasonal(match["id"], months)
+            output = format_seasonal(data, match["name"])
+    elif args.indices:
+        data = get_indices()
+        output = format_indices(data)
     elif args.alerts:
         alerts_data = get_alerts()
         output = format_alerts(alerts_data)
