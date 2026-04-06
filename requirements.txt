@@ -1,0 +1,4 @@
+numpy
+scipy
+flask
+flask-cors

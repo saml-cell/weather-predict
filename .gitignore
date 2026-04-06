@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+data/weather.db
+data/*.db-wal
+data/*.db-shm
+.claude/
+.venv/
+venv/
+node_modules/
+*.log

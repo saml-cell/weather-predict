@@ -1,0 +1,1445 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Weather Predict Dashboard</title>
+
+  <!-- Tailwind CSS -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            sky: { 950: '#0a1628' },
+          }
+        }
+      }
+    }
+  </script>
+
+  <!-- Leaflet CSS + JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <!-- Chart.js -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+
+  <!-- React 18 -->
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+
+  <!-- Babel for JSX -->
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+  <style>
+    body { margin: 0; font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+    .leaflet-container { height: 100%; width: 100%; }
+    .leaflet-tile-pane { will-change: transform; }
+    .fade-in { animation: fadeIn 0.3s ease-in; }
+    @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+    .chart-container { position: relative; height: 250px; }
+    ::-webkit-scrollbar { width: 6px; }
+    ::-webkit-scrollbar-track { background: #1e293b; }
+    ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+  </style>
+</head>
+<body class="bg-slate-900 text-white min-h-screen">
+  <div id="root"></div>
+
+  <script type="text/babel" data-type="module">
+    const { useState, useEffect, useRef, useCallback } = React;
+
+    // =====================================================================
+    // API Client
+    // =====================================================================
+    const api = {
+      getCities: () => fetch('/api/cities').then(r => r.json()),
+      addCity: (name) => fetch('/api/cities', {
+        method: 'POST', headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ name })
+      }).then(r => r.json()),
+      getForecast: (cityId) => fetch(`/api/forecast/${cityId}`).then(r => r.json()),
+      getObservations: (cityId, days=30) => fetch(`/api/observations/${cityId}?days=${days}`).then(r => r.json()),
+      getAccuracy: (cityId) => fetch(`/api/accuracy/${cityId}`).then(r => r.json()),
+      getTrends: (cityId, days=30) => fetch(`/api/trends/${cityId}?days=${days}`).then(r => r.json()),
+      getCompare: (cityId) => fetch(`/api/compare/${cityId}`).then(r => r.json()),
+      getSeasonal: (cityId, months=3) => fetch(`/api/seasonal/${cityId}?months=${months}`).then(r => r.json()),
+      getIndices: () => fetch('/api/indices').then(r => r.json()),
+    };
+
+    // =====================================================================
+    // Helpers
+    // =====================================================================
+    const conditionEmoji = {
+      clear: '\u2600\uFE0F', partly_cloudy: '\u26C5', cloudy: '\u2601\uFE0F',
+      rain: '\uD83C\uDF27\uFE0F', heavy_rain: '\u26C8\uFE0F', drizzle: '\uD83C\uDF26\uFE0F',
+      snow: '\u2744\uFE0F', thunderstorm: '\u26A1', fog: '\uD83C\uDF2B\uFE0F', unknown: '\u2753'
+    };
+
+    const getEmoji = (cond) => conditionEmoji[cond] || conditionEmoji.unknown;
+
+    // UV Index helpers
+    const uvColor = (uv) => {
+      if (uv == null) return 'bg-slate-600';
+      if (uv <= 2) return 'bg-green-500';
+      if (uv <= 5) return 'bg-yellow-500';
+      if (uv <= 7) return 'bg-orange-500';
+      if (uv <= 10) return 'bg-red-500';
+      return 'bg-purple-500';
+    };
+    const uvLabel = (uv) => {
+      if (uv == null) return '';
+      if (uv <= 2) return 'Low';
+      if (uv <= 5) return 'Moderate';
+      if (uv <= 7) return 'High';
+      if (uv <= 10) return 'Very High';
+      return 'Extreme';
+    };
+
+    // Wind direction helper
+    const degToCompass = (deg) => {
+      if (deg == null) return '';
+      const dirs = ['N', 'NE', 'E', 'SE', 'S', 'SW', 'W', 'NW'];
+      return dirs[Math.round(deg / 45) % 8];
+    };
+
+    const confidenceColor = { HIGH: 'text-emerald-400', MODERATE: 'text-yellow-400', LOW: 'text-red-400' };
+    const confidenceBg = { HIGH: 'bg-emerald-500/20 border-emerald-500/40', MODERATE: 'bg-yellow-500/20 border-yellow-500/40', LOW: 'bg-red-500/20 border-red-500/40' };
+
+    // =====================================================================
+    // Navigation
+    // =====================================================================
+    // =====================================================================
+    // LEARN MODE — Explanations Database
+    // =====================================================================
+    const LEARN = {
+      // CityDetail metrics
+      temperature: "Current air temperature measured at 2m height. This is a weighted average from multiple weather APIs, where each source's weight is based on its recent accuracy for this city.",
+      feels_like: "Apparent temperature accounting for wind chill (cold) and heat index (hot). Combines air temp, wind speed, and humidity using the Steadman formula. Can differ significantly from actual temp in extreme conditions.",
+      humidity: "Relative humidity — the percentage of moisture in the air relative to the maximum it can hold at this temperature. 100% = saturated air (fog/rain likely). Below 30% = very dry.",
+      pressure: "Atmospheric pressure in hectopascals (hPa). Standard sea level is ~1013 hPa. Falling pressure often signals approaching storms; rising pressure indicates clearing weather. The system tracks pressure trends for physics corrections.",
+      wind: "Wind speed in km/h at 10m height. This is the weighted consensus from all forecast sources, weighted by each source's historical wind prediction accuracy.",
+      confidence: "Overall forecast confidence based on source agreement. HIGH = sources agree closely (reliable). MODERATE = some disagreement. LOW = large spread between sources (uncertain). Calculated from the standard deviation of all source predictions.",
+      confidence_score: "Numerical confidence score (0-1). Computed as: 1 - (normalized spread between sources). Higher = more agreement = more reliable forecast.",
+      dew_point: "Dew point temperature — the temp at which air becomes saturated and water condenses. Closer to air temp = more humid. Used to detect fog/rain risk.",
+      dew_point_depression: "Gap between air temperature and dew point (T - Td). Small gap (<2.5\u00B0C) = high condensation risk, fog likely. Large gap (>15\u00B0C) = very dry air. The physics engine uses this to adjust precipitation probabilities.",
+
+      // 7-day forecast table
+      weighted_high: "Weighted high temperature from all sources. Each API's prediction is multiplied by its accuracy-based weight, then summed. Formula: T = \u03A3(w_i \u00D7 T_i) where w_i is the Bayesian weight for source i.",
+      weighted_low: "Weighted low temperature, calculated the same way as the high. Sources with better track records for this city get higher weights.",
+      rain_pct: "Weighted precipitation probability (%). Consensus from all sources, weighted by accuracy. Represents the likelihood of measurable precipitation (\u22650.1mm) on this day.",
+      adj_pct: "Physics-adjusted precipitation probability. The raw weighted value is modified by the meteorological physics engine based on: dew point depression, pressure trends, and humidity patterns. Yellow highlight = adjustment was made.",
+      wind_col: "Weighted wind speed forecast (km/h). Consensus value from all sources weighted by their wind prediction accuracy.",
+      physics_corrections: "Layer 2 physics corrections applied to this day's forecast. The system uses thermodynamic equations (dew point, pressure stability index) to adjust the raw weighted forecast. Examples: boosting rain probability when dew point depression is low, or reducing it when pressure is rising rapidly.",
+
+      // Source accuracy
+      source_weight: "Bayesian accuracy weight for this source and metric. Updated daily by comparing forecasts against observations. Higher weight = this source has been more accurate recently. Weights across sources sum to 1.0.",
+      mae: "Mean Absolute Error — average magnitude of this source's prediction errors in \u00B0C or mm. Lower = more accurate. Calculated over the last 30 days of verified forecasts.",
+      sample_count: "Number of forecast-vs-observation pairs used to compute this source's accuracy. More samples = more reliable weight estimate. Minimum 7 needed before weights become meaningful.",
+
+      // Seasonal — Indices
+      oni: "Oceanic Ni\u00F1o Index (ONI) — the #1 global climate driver. Measures sea surface temperature anomaly in the tropical Pacific (Ni\u00F1o 3.4 region). El Ni\u00F1o (>+0.5) warms global temps; La Ni\u00F1a (<-0.5) cools them. Affects weather patterns worldwide for 6-18 months.",
+      nao: "North Atlantic Oscillation — pressure difference between Icelandic Low and Azores High. Positive NAO = strong westerlies, mild wet winters in N. Europe, dry Mediterranean. Negative NAO = cold continental European winters, wet Mediterranean.",
+      ao: "Arctic Oscillation — strength of the polar vortex. Positive = strong vortex, cold air trapped at poles, mild mid-latitudes. Negative = weak vortex, polar air outbreaks to mid-latitudes (cold waves in US/Europe).",
+      pdo: "Pacific Decadal Oscillation — a long-lived (20-30 year) pattern of Pacific sea surface temperatures. Positive PDO amplifies El Ni\u00F1o effects; negative PDO amplifies La Ni\u00F1a. Affects N. American and Asian climate.",
+      amo: "Atlantic Multidecadal Oscillation — 60-80 year cycle of North Atlantic sea surface temps. Warm phase = more Atlantic hurricanes, warmer European summers, drier US Southwest. Currently in warm phase.",
+      pna: "Pacific-North American pattern — atmospheric wave pattern linking the Pacific and N. America. Positive PNA = ridging over western N. America (warm/dry), troughing in eastern N. America (cold/wet).",
+      soi: "Southern Oscillation Index — atmospheric component of ENSO. Measures pressure difference between Tahiti and Darwin. Negative SOI = El Ni\u00F1o conditions; positive = La Ni\u00F1a. Complements the oceanic ONI.",
+      qbo: "Quasi-Biennial Oscillation — alternating easterly/westerly wind regimes in the tropical stratosphere with ~28 month cycle. Influences polar vortex strength and can modulate ENSO effects on mid-latitude weather.",
+      dmi: "Indian Ocean Dipole (Dipole Mode Index) — temperature difference between western and eastern Indian Ocean. Positive IOD = drought in Australia/Indonesia, wet in East Africa. Can amplify or counteract ENSO.",
+      ea: "East Atlantic pattern — second most prominent mode of Atlantic variability after NAO. Positive EA = milder European winters. Acts independently of NAO, adding an extra warming/cooling signal.",
+      scand: "Scandinavian pattern — atmospheric blocking over Scandinavia. Positive = persistent high pressure over Scandinavia, cold/dry there, wet Mediterranean. Negative = westerly flow dominates.",
+      wp: "West Pacific pattern — low-level circulation anomalies over the western North Pacific. Affects East Asian monsoon and can influence weather patterns across the Pacific to western North America.",
+      tnh: "Tropical/Northern Hemisphere pattern — links tropical convection to Northern Hemisphere circulation. Active during boreal winter, connecting tropical heating to mid-latitude wave patterns.",
+      tna: "Tropical North Atlantic SST — sea surface temperature anomaly in the tropical North Atlantic. Warm TNA = enhanced hurricane activity, affects Caribbean and West African rainfall.",
+      tsa: "Tropical South Atlantic SST — sea surface temperature anomaly in the tropical South Atlantic. Influences South American rainfall patterns and the Atlantic ITCZ position.",
+      nino34: "Ni\u00F1o 3.4 region SST anomaly — raw sea surface temperature anomaly in the core ENSO monitoring region (5\u00B0N-5\u00B0S, 170\u00B0-120\u00B0W). The ONI is a 3-month running mean of this value.",
+      np: "North Pacific Index — area-weighted sea level pressure over the North Pacific. Reflects the strength and position of the Aleutian Low, which drives Pacific storm tracks.",
+      aao: "Antarctic Oscillation (Southern Annular Mode) — the Southern Hemisphere equivalent of the AO. Affects mid-to-high southern latitude weather. Positive = stronger westerlies around Antarctica.",
+
+      // Seasonal forecast values
+      temp_anomaly: "Temperature anomaly in \u00B0C — how much warmer (+) or cooler (-) this month is predicted to be compared to the 1991-2020 climatological average for this city. Computed by Bayesian Model Averaging of 4 algorithms: analog, ridge regression, composite analysis, and ECMWF SEAS5.",
+      precip_anomaly: "Precipitation anomaly as % deviation from normal. +20% means 20% more rain than the 30-year average. Negative = drier than normal. Derived from the same BMA combination of statistical and dynamical models.",
+      seasonal_confidence: "Forecast confidence (0-1), decaying with lead time. Formula: base_confidence \u00D7 exp(-0.1 \u00D7 lead_months). Base confidence comes from cross-validated skill scores. HIGH (\u22650.6) = skillful prediction likely. LOW (<0.3) = little skill beyond climatology.",
+      tercile_probs: "Tercile probabilities — chance of temperature falling in each third of the historical distribution. Below Normal (blue): cooler than the bottom 33%. Near Normal (gray): middle third. Above Normal (red): warmer than the top 33%. Equal thirds (33/34/33) = no skill, same as climatology.",
+
+      // Methods
+      bma: "Bayesian Model Averaging — combines predictions from multiple algorithms. Each method gets a weight based on its cross-validated performance (log-likelihood). Combined mean: \u03BC = \u03A3(w_m \u00D7 \u03BC_m). Weights are re-estimated for each city/lead time. Methods with better hindcast skill get higher weights.",
+      analog: "Analog forecasting — finds historical years where teleconnection indices were most similar to the current state. Uses weighted Euclidean distance: d = \u221A\u03A3(w_i(x_current - x_hist)\u00B2). Top 10 closest years are Gaussian-kernel weighted to produce the forecast. Based on the idea that similar climate states produce similar weather.",
+      ridge_regression: "Ridge regression — linear model predicting monthly anomalies from lagged teleconnection indices. Formula: \u03B2 = (X'X + \u03BBI)\u207B\u00B9X'y where \u03BB=1.0 prevents overfitting. Uses leave-one-out cross-validation for skill estimation. Can capture linear index-weather relationships that analogs might miss.",
+      composite: "Composite analysis — groups historical years by teleconnection phase (e.g., 'El Ni\u00F1o + negative NAO') and computes the mean anomaly for the matching phase combination. Simpler than analog/regression but robust. Requires \u22655 years per phase bin.",
+      ecmwf_seas5: "ECMWF SEAS5 dynamical model — a global climate model run by the European Centre for Medium-Range Weather Forecasts. Uses 51 ensemble members to simulate future atmospheric evolution. Fetched via Open-Meteo Seasonal API. Converted to anomalies using stored 30-year climatology.",
+      analog_distance: "Analog distance — measure of how similar a historical year's teleconnection state was to the current state. Lower distance = closer match. Computed as: d = \u221A\u03A3(w_i(x_now - x_then)\u00B2) using weighted indices with lags of 0-3 months. The closest analogs contribute most to the forecast.",
+
+      // General
+      climatology: "30-year climatological average (1991-2020 reference period). Computed from daily observations for each month. This is the 'normal' baseline against which anomalies are measured. Built from Open-Meteo Archive API historical data.",
+    };
+
+    // =====================================================================
+    // LEARN TIP COMPONENT
+    // =====================================================================
+    function LearnTip({ id, learnMode, children, className = '' }) {
+      const [open, setOpen] = useState(false);
+      const [pos, setPos] = useState({ top: 0, left: 0 });
+      const triggerRef = useRef(null);
+      const popupRef = useRef(null);
+
+      useEffect(() => {
+        if (!open) return;
+        const handleClick = (e) => {
+          if (popupRef.current && !popupRef.current.contains(e.target) &&
+              triggerRef.current && !triggerRef.current.contains(e.target)) setOpen(false);
+        };
+        document.addEventListener('mousedown', handleClick);
+        return () => document.removeEventListener('mousedown', handleClick);
+      }, [open]);
+
+      const handleOpen = (e) => {
+        e.stopPropagation();
+        if (open) { setOpen(false); return; }
+        const rect = e.currentTarget.getBoundingClientRect();
+        const popupW = 320;
+        let left = rect.left + rect.width / 2 - popupW / 2;
+        left = Math.max(8, Math.min(left, window.innerWidth - popupW - 8));
+        const spaceAbove = rect.top;
+        const top = spaceAbove > 200 ? rect.top - 8 : rect.bottom + 8;
+        setPos({ top, left, above: spaceAbove > 200 });
+        setOpen(true);
+      };
+
+      if (!learnMode || !LEARN[id]) return <span className={className}>{children}</span>;
+
+      return (
+        <span className={`${className}`}>
+          <span ref={triggerRef}
+            onClick={handleOpen}
+            className="cursor-help border-b border-dashed border-amber-400/60 hover:border-amber-400 hover:bg-amber-400/10 rounded-sm px-0.5 transition"
+          >
+            {children}
+          </span>
+          {open && ReactDOM.createPortal(
+            <div ref={popupRef}
+              className="fixed z-[9999] w-80 p-3 rounded-lg bg-slate-900 border border-amber-500/40 shadow-xl shadow-black/50 text-xs text-slate-200 leading-relaxed"
+              style={{
+                top: pos.above ? undefined : pos.top,
+                bottom: pos.above ? `${window.innerHeight - pos.top}px` : undefined,
+                left: pos.left,
+                animation: 'fadeIn 0.15s ease-out',
+              }}>
+              <div className="flex items-start justify-between gap-2 mb-1">
+                <span className="text-amber-400 font-semibold text-[11px] uppercase tracking-wide">{id.replace(/_/g, ' ')}</span>
+                <button onClick={(e) => { e.stopPropagation(); setOpen(false); }} className="text-slate-500 hover:text-white text-sm leading-none">{'\u00D7'}</button>
+              </div>
+              {LEARN[id]}
+            </div>,
+            document.body
+          )}
+        </span>
+      );
+    }
+
+    function App() {
+      const [page, setPage] = useState('map');
+      const [selectedCity, setSelectedCity] = useState(null);
+      const [cities, setCities] = useState([]);
+      const [learnMode, setLearnMode] = useState(false);
+
+      useEffect(() => { api.getCities().then(setCities).catch(console.error); }, []);
+
+      const openCity = (city) => { setSelectedCity(city); setPage('detail'); };
+      const openTrends = (city) => { setSelectedCity(city); setPage('trends'); };
+      const openSeasonal = (city) => { setSelectedCity(city); setPage('seasonal'); };
+
+      return (
+        <div className="min-h-screen">
+          {/* Nav */}
+          <nav className="bg-slate-800/80 backdrop-blur-sm border-b border-slate-700 px-6 py-3 flex items-center justify-between sticky top-0 z-50">
+            <div className="flex items-center gap-3 cursor-pointer" onClick={() => setPage('map')}>
+              <span className="text-2xl">{'\uD83C\uDF24\uFE0F'}</span>
+              <h1 className="text-lg font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
+                Weather Predict
+              </h1>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={() => setPage('map')}
+                className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${page === 'map' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                {'\uD83D\uDDFA\uFE0F'} Map
+              </button>
+              {selectedCity && (
+                <>
+                  <button onClick={() => setPage('detail')}
+                    className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${page === 'detail' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                    {'\uD83D\uDCCA'} {selectedCity.name}
+                  </button>
+                  <button onClick={() => setPage('trends')}
+                    className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${page === 'trends' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                    {'\uD83D\uDCC8'} Trends
+                  </button>
+                  <button onClick={() => openSeasonal(selectedCity)}
+                    className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${page === 'seasonal' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                    {'\uD83C\uDF0D'} Seasonal
+                  </button>
+                </>
+              )}
+              {/* Learn Mode toggle — always visible */}
+              <div className="ml-3 pl-3 border-l border-slate-600">
+                <button onClick={() => setLearnMode(!learnMode)}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition flex items-center gap-1.5 ${learnMode ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                  {learnMode ? '\uD83D\uDCA1' : '\u2753'} {learnMode ? 'Learn ON' : 'Learn'}
+                </button>
+              </div>
+            </div>
+          </nav>
+
+          {/* Learn Mode banner */}
+          {learnMode && (
+            <div className="bg-amber-500/10 border-b border-amber-500/30 px-6 py-2 text-center text-sm text-amber-300">
+              Learn Mode is ON — click on any <span className="border-b border-dashed border-amber-400/60 px-0.5">underlined element</span> to see what it means and how it was calculated.
+            </div>
+          )}
+
+          {/* Pages */}
+          <main className="fade-in">
+            {page === 'map' && <MapView cities={cities} setCities={setCities} onSelect={openCity} />}
+            {page === 'detail' && selectedCity && <CityDetail city={selectedCity} onTrends={() => openTrends(selectedCity)} onSeasonal={() => openSeasonal(selectedCity)} learnMode={learnMode} />}
+            {page === 'trends' && selectedCity && <TrendsView city={selectedCity} />}
+            {page === 'seasonal' && selectedCity && <SeasonalView city={selectedCity} learnMode={learnMode} />}
+          </main>
+        </div>
+      );
+    }
+
+    // =====================================================================
+    // MAP VIEW
+    // =====================================================================
+    function MapView({ cities, setCities, onSelect }) {
+      const mapRef = useRef(null);
+      const mapInstanceRef = useRef(null);
+      const [newCity, setNewCity] = useState('');
+      const [adding, setAdding] = useState(false);
+      const [previews, setPreviews] = useState({});
+      const [radarOn, setRadarOn] = useState(false);
+      const radarLayerRef = useRef(null);
+      const [geoLoading, setGeoLoading] = useState(false);
+
+      useEffect(() => {
+        if (mapInstanceRef.current) return;
+        const map = L.map(mapRef.current, { zoomControl: false }).setView([30, 0], 2);
+        L.control.zoom({ position: 'bottomright' }).addTo(map);
+        L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png', {
+          attribution: '&copy; OpenStreetMap &copy; CARTO',
+          maxZoom: 19,
+        }).addTo(map);
+        mapInstanceRef.current = map;
+        // Fix tile alignment after container is fully rendered
+        setTimeout(() => map.invalidateSize(), 100);
+      }, []);
+
+      // Re-align tiles whenever the map view becomes visible again
+      useEffect(() => {
+        if (mapInstanceRef.current) {
+          setTimeout(() => mapInstanceRef.current.invalidateSize(), 50);
+        }
+      });
+
+      useEffect(() => {
+        if (!mapInstanceRef.current) return;
+        const map = mapInstanceRef.current;
+        map.eachLayer(l => { if (l instanceof L.Marker) map.removeLayer(l); });
+
+        cities.forEach(city => {
+          const preview = previews[city.id];
+          const temp = preview ? `${preview.current.temp_c}\u00B0C` : '...';
+          const conf = preview ? preview.current.confidence : '';
+          const cond = preview?.daily?.[0]?.weighted_condition || '';
+
+          const borderColor = conf === 'HIGH' ? '#34d399' : conf === 'MODERATE' ? '#fbbf24' : '#60a5fa';
+          const icon = L.divIcon({
+            className: '',
+            html: `<div style="display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-100%)">
+              <div style="background:rgba(30,41,59,0.92);border:2px solid ${borderColor};border-radius:12px;padding:4px 10px;white-space:nowrap;font-size:13px;color:white;font-weight:600;backdrop-filter:blur(4px);box-shadow:0 2px 8px rgba(0,0,0,0.4)">
+                ${getEmoji(cond)} ${city.name} ${temp}
+              </div>
+              <div style="width:0;height:0;border-left:6px solid transparent;border-right:6px solid transparent;border-top:8px solid ${borderColor};margin-top:-1px"></div>
+              <div style="width:6px;height:6px;border-radius:50%;background:${borderColor};margin-top:1px;box-shadow:0 0 6px ${borderColor}"></div>
+            </div>`,
+            iconSize: [0, 0],
+            iconAnchor: [0, 0],
+          });
+
+          L.marker([city.lat, city.lon], { icon })
+            .addTo(map)
+            .on('click', () => onSelect(city));
+        });
+      }, [cities, previews, onSelect]);
+
+      // Radar overlay toggle
+      useEffect(() => {
+        const map = mapInstanceRef.current;
+        if (!map) return;
+        if (radarOn) {
+          fetch('https://api.rainviewer.com/public/weather-maps.json')
+            .then(r => r.json())
+            .then(data => {
+              const radarPast = data?.radar?.past;
+              if (!radarPast?.length) return;
+              const latest = radarPast[radarPast.length - 1];
+              if (radarLayerRef.current) { map.removeLayer(radarLayerRef.current); }
+              radarLayerRef.current = L.tileLayer(
+                `https://tilecache.rainviewer.com${latest.path}/256/{z}/{x}/{y}/2/1_1.png`,
+                { opacity: 0.6, zIndex: 400 }
+              ).addTo(map);
+            }).catch(() => {});
+        } else {
+          if (radarLayerRef.current) {
+            map.removeLayer(radarLayerRef.current);
+            radarLayerRef.current = null;
+          }
+        }
+      }, [radarOn]);
+
+      // Load previews for all cities
+      useEffect(() => {
+        cities.forEach(city => {
+          if (!previews[city.id]) {
+            api.getForecast(city.id).then(data => {
+              if (!data.error) setPreviews(prev => ({ ...prev, [city.id]: data }));
+            }).catch(() => {});
+          }
+        });
+      }, [cities]);
+
+      const handleGeolocate = async () => {
+        if (!navigator.geolocation) return;
+        setGeoLoading(true);
+        navigator.geolocation.getCurrentPosition(
+          async (pos) => {
+            try {
+              const { latitude, longitude } = pos.coords;
+              const res = await fetch(`https://geocoding-api.open-meteo.com/v1/reverse?latitude=${latitude}&longitude=${longitude}`);
+              const data = await res.json();
+              const name = data?.results?.[0]?.name || data?.name;
+              if (name) {
+                const result = await api.addCity(name);
+                if (!result.error) {
+                  setCities(prev => {
+                    if (prev.find(c => c.id === result.id)) return prev;
+                    return [...prev, result];
+                  });
+                  mapInstanceRef.current?.flyTo([result.lat, result.lon], 8, { duration: 1.5 });
+                }
+              }
+            } catch (err) { console.error('Geolocation reverse geocode failed', err); }
+            setGeoLoading(false);
+          },
+          () => { setGeoLoading(false); },
+          { timeout: 10000 }
+        );
+      };
+
+      const handleAddCity = async (e) => {
+        e.preventDefault();
+        if (!newCity.trim() || adding) return;
+        setAdding(true);
+        try {
+          const result = await api.addCity(newCity);
+          if (!result.error) {
+            setCities(prev => [...prev, result]);
+            setNewCity('');
+            mapInstanceRef.current?.flyTo([result.lat, result.lon], 6, { duration: 1.5 });
+          }
+        } catch (err) { console.error(err); }
+        setAdding(false);
+      };
+
+      return (
+        <div className="relative" style={{ height: 'calc(100vh - 52px)' }}>
+          <div ref={mapRef} className="absolute inset-0" />
+
+          {/* Search overlay */}
+          <div className="absolute top-4 left-4 z-[1000]">
+            <form onSubmit={handleAddCity} className="flex gap-2">
+              <input value={newCity} onChange={e => setNewCity(e.target.value)}
+                placeholder="Add city... (e.g. Paris)"
+                className="bg-slate-800/90 backdrop-blur-sm border border-slate-600 rounded-lg px-4 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:border-blue-500 w-64" />
+              <button type="submit" disabled={adding}
+                className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 px-4 py-2 rounded-lg text-sm font-medium transition">
+                {adding ? '...' : '+ Add'}
+              </button>
+              <button type="button" onClick={handleGeolocate} disabled={geoLoading}
+                className="bg-slate-700/90 hover:bg-slate-600 disabled:bg-slate-600 backdrop-blur-sm border border-slate-600 px-3 py-2 rounded-lg text-sm font-medium transition flex items-center gap-1.5"
+                title="Use my location">
+                {geoLoading ? (
+                  <span className="animate-spin inline-block w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full" />
+                ) : (
+                  <>{'\uD83D\uDCCD'} My Location</>
+                )}
+              </button>
+            </form>
+          </div>
+
+          {/* Radar toggle */}
+          <div className="absolute top-4 right-4 z-[1000]">
+            <button onClick={() => setRadarOn(!radarOn)}
+              className={`backdrop-blur-sm border px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2 ${
+                radarOn
+                  ? 'bg-cyan-600/90 border-cyan-500 text-white'
+                  : 'bg-slate-800/90 border-slate-600 text-slate-300 hover:bg-slate-700'
+              }`}>
+              {'\uD83C\uDF27\uFE0F'} Radar {radarOn ? 'ON' : 'OFF'}
+            </button>
+          </div>
+
+          {/* City cards at bottom */}
+          <div className="absolute bottom-4 left-4 right-4 z-[1000] flex gap-3 overflow-x-auto pb-2">
+            {cities.map(city => {
+              const p = previews[city.id];
+              return (
+                <div key={city.id} onClick={() => onSelect(city)}
+                  className="bg-slate-800/90 backdrop-blur-sm border border-slate-700 rounded-xl p-4 min-w-[200px] cursor-pointer hover:border-blue-500/50 transition flex-shrink-0">
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="font-semibold text-sm">{city.name}</span>
+                    {p && <span className={`text-xs px-2 py-0.5 rounded-full border ${confidenceBg[p.current.confidence]}`}>
+                      {p.current.confidence}
+                    </span>}
+                  </div>
+                  <div className="text-slate-400 text-xs mb-2">{city.country}</div>
+                  {p ? (
+                    <div className="flex items-center gap-3">
+                      <span className="text-2xl font-bold">{p.current.temp_c}&deg;</span>
+                      <div className="text-xs text-slate-400">
+                        <div>Feels {p.current.feels_like_c}&deg;</div>
+                        <div>{p.current.humidity_pct}% humidity</div>
+                        <div>{p.current.pressure_hpa} hPa</div>
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-slate-500 text-sm">Loading...</div>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      );
+    }
+
+    // =====================================================================
+    // CITY DETAIL VIEW
+    // =====================================================================
+    function CityDetail({ city, onTrends, onSeasonal, learnMode }) {
+      const [forecast, setForecast] = useState(null);
+      const [accuracy, setAccuracy] = useState(null);
+      const [compare, setCompare] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        setLoading(true);
+        Promise.all([
+          api.getForecast(city.id),
+          api.getAccuracy(city.id),
+          api.getCompare(city.id),
+        ]).then(([f, a, c]) => {
+          setForecast(f);
+          setAccuracy(a);
+          setCompare(c);
+          setLoading(false);
+        }).catch(() => setLoading(false));
+      }, [city.id]);
+
+      const retryLoad = () => {
+        setLoading(true);
+        Promise.all([
+          api.getForecast(city.id),
+          api.getAccuracy(city.id),
+          api.getCompare(city.id),
+        ]).then(([f, a, c]) => {
+          setForecast(f);
+          setAccuracy(a);
+          setCompare(c);
+          setLoading(false);
+        }).catch(() => setLoading(false));
+      };
+
+      if (loading) return <ForecastSkeleton />;
+      if (!forecast || forecast.error) return (
+        <div className="p-8 flex flex-col items-center gap-4">
+          <span className="text-red-400 text-lg">Error loading forecast</span>
+          <button onClick={retryLoad} className="bg-blue-600 hover:bg-blue-700 px-5 py-2 rounded-lg text-sm font-medium transition">
+            Retry
+          </button>
+        </div>
+      );
+
+      const cur = forecast.current;
+
+      return (
+        <div className="max-w-7xl mx-auto p-6 space-y-6 fade-in">
+          {/* Header */}
+          <div className="flex items-center justify-between">
+            <div>
+              <h2 className="text-3xl font-bold">{forecast.location.name}</h2>
+              <p className="text-slate-400">{forecast.location.country} &middot; {forecast.sources_used.length} sources &middot; {forecast.sources_used.join(', ')}</p>
+            </div>
+            <div className="flex gap-2">
+              <button onClick={onTrends} className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm transition">
+                {'\uD83D\uDCC8'} View Trends
+              </button>
+              <button onClick={onSeasonal} className="bg-purple-700 hover:bg-purple-600 px-4 py-2 rounded-lg text-sm transition">
+                {'\uD83C\uDF0D'} Seasonal Outlook
+              </button>
+            </div>
+          </div>
+
+          {/* Current conditions grid */}
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+            <LearnTip id="temperature" learnMode={learnMode}><MetricCard label="Temperature" value={`${cur.temp_c}\u00B0C`} sub={`${cur.temp_f}\u00B0F`} /></LearnTip>
+            <LearnTip id="feels_like" learnMode={learnMode}><MetricCard label="Feels Like" value={`${cur.feels_like_c}\u00B0C`} sub={`${cur.feels_like_f}\u00B0F`} /></LearnTip>
+            <LearnTip id="humidity" learnMode={learnMode}><MetricCard label="Humidity" value={`${cur.humidity_pct}%`} sub={cur.dew_point_c != null ? `DP: ${cur.dew_point_c}\u00B0C` : ''} /></LearnTip>
+            <LearnTip id="pressure" learnMode={learnMode}><MetricCard label="Pressure" value={`${cur.pressure_hpa}`} sub="hPa" /></LearnTip>
+            <LearnTip id="wind" learnMode={learnMode}><MetricCard label="Wind" value={`${cur.wind_speed_kmh}`} sub="km/h" /></LearnTip>
+            <LearnTip id="confidence" learnMode={learnMode}><MetricCard label="Confidence" value={cur.confidence}
+              sub={`Score: ${cur.confidence_score}`}
+              className={confidenceBg[cur.confidence]} /></LearnTip>
+            {/* UV Index */}
+            {cur.uv_index != null && (
+              <div className="rounded-xl p-4 border bg-slate-800 border-slate-700">
+                <div className="text-xs text-slate-400 uppercase tracking-wide mb-1">UV Index</div>
+                <div className="flex items-center gap-2">
+                  <span className={`inline-block w-8 h-8 rounded-full ${uvColor(cur.uv_index)} flex items-center justify-center text-sm font-bold text-white`}
+                    style={{display:'inline-flex',alignItems:'center',justifyContent:'center'}}>
+                    {cur.uv_index}
+                  </span>
+                  <span className="text-sm font-medium">{uvLabel(cur.uv_index)}</span>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Dew point info */}
+          {cur.dew_point_depression_c != null && (
+            <div className={`rounded-xl p-4 border ${cur.dew_point_depression_c < 2.5 ? 'bg-yellow-500/10 border-yellow-500/30' : 'bg-slate-800 border-slate-700'}`}>
+              <LearnTip id="dew_point_depression" learnMode={learnMode}>
+                <span className="text-sm font-medium">Dew Point Depression: </span>
+                <span className="text-sm">{cur.dew_point_depression_c}&deg;C</span>
+              </LearnTip>
+              <span className="text-slate-400 text-sm ml-2">
+                {cur.dew_point_depression_c < 1.5 ? '- Fog/rain almost certain' :
+                 cur.dew_point_depression_c < 2.5 ? '- High condensation risk' :
+                 cur.dew_point_depression_c < 4 ? '- Moderate moisture' :
+                 cur.dew_point_depression_c > 15 ? '- Very dry air' : '- Normal'}
+              </span>
+            </div>
+          )}
+
+          {/* Sunrise / Sunset for today */}
+          {forecast.daily?.[0] && (forecast.daily[0].sunrise || forecast.daily[0].sunset) && (
+            <div className="flex items-center gap-6 bg-slate-800 rounded-xl border border-slate-700 p-4">
+              {forecast.daily[0].sunrise && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">{'\u2600\uFE0F'}</span>
+                  <div>
+                    <div className="text-xs text-slate-400 uppercase">Sunrise</div>
+                    <div className="text-sm font-medium">{forecast.daily[0].sunrise}</div>
+                  </div>
+                </div>
+              )}
+              {forecast.daily[0].sunset && (
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">{'\uD83C\uDF05'}</span>
+                  <div>
+                    <div className="text-xs text-slate-400 uppercase">Sunset</div>
+                    <div className="text-sm font-medium">{forecast.daily[0].sunset}</div>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* 7-day forecast */}
+          <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+            <div className="px-5 py-3 border-b border-slate-700">
+              <h3 className="font-semibold">7-Day Weighted Forecast</h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-slate-400 text-xs uppercase">
+                    <th className="px-5 py-3 text-left">Date</th>
+                    <th className="px-3 py-3 text-center">Condition</th>
+                    <th className="px-3 py-3 text-right"><LearnTip id="weighted_high" learnMode={learnMode}>High</LearnTip></th>
+                    <th className="px-3 py-3 text-right"><LearnTip id="weighted_low" learnMode={learnMode}>Low</LearnTip></th>
+                    <th className="px-3 py-3 text-right"><LearnTip id="rain_pct" learnMode={learnMode}>Rain %</LearnTip></th>
+                    <th className="px-3 py-3 text-right"><LearnTip id="adj_pct" learnMode={learnMode}>Adj %</LearnTip></th>
+                    <th className="px-3 py-3 text-right"><LearnTip id="wind_col" learnMode={learnMode}>Wind</LearnTip></th>
+                    <th className="px-5 py-3 text-left"><LearnTip id="physics_corrections" learnMode={learnMode}>Physics</LearnTip></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {forecast.daily.map((day, i) => (
+                    <tr key={day.date} className={`border-t border-slate-700/50 ${i === 0 ? 'bg-blue-500/5' : ''}`}>
+                      <td className="px-5 py-3 font-medium">
+                        {new Date(day.date + 'T00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                      </td>
+                      <td className="px-3 py-3 text-center text-lg">{getEmoji(day.weighted_condition)}</td>
+                      <td className="px-3 py-3 text-right font-medium text-orange-400">{day.weighted_high_c != null ? `${day.weighted_high_c}\u00B0` : '-'}</td>
+                      <td className="px-3 py-3 text-right font-medium text-blue-400">{day.weighted_low_c != null ? `${day.weighted_low_c}\u00B0` : '-'}</td>
+                      <td className="px-3 py-3 text-right">{day.weighted_precip_prob != null ? `${Math.round(day.weighted_precip_prob)}%` : '-'}</td>
+                      <td className={`px-3 py-3 text-right font-medium ${day.adjusted_precip_prob !== day.weighted_precip_prob ? 'text-yellow-400' : ''}`}>
+                        {day.adjusted_precip_prob != null ? `${Math.round(day.adjusted_precip_prob)}%` : '-'}
+                      </td>
+                      <td className="px-3 py-3 text-right">
+                        {day.weighted_wind_kmh != null ? day.weighted_wind_kmh : '-'}
+                        {day.wind_direction_deg != null && <span className="text-slate-400 ml-1 text-xs">{degToCompass(day.wind_direction_deg)}</span>}
+                      </td>
+                      <td className="px-5 py-3 text-xs text-slate-400 max-w-xs truncate">
+                        {day.physics_corrections?.length > 0 ? day.physics_corrections.join('; ') : '-'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Hourly Forecast */}
+          {forecast.hourly && forecast.hourly.length > 0 && (
+            <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+              <div className="px-5 py-3 border-b border-slate-700">
+                <h3 className="font-semibold">Hourly Forecast (Next 24h)</h3>
+              </div>
+              <div className="overflow-x-auto p-4">
+                <div className="flex gap-3" style={{minWidth: 'max-content'}}>
+                  {forecast.hourly.slice(0, 24).map((hr, i) => (
+                    <div key={i} className="flex-shrink-0 w-24 bg-slate-700/50 rounded-lg p-3 text-center border border-slate-600/50">
+                      <div className="text-xs text-slate-400 font-medium mb-1">
+                        {hr.time ? hr.time.slice(11, 16) : `${String(i).padStart(2, '0')}:00`}
+                      </div>
+                      <div className="text-lg mb-1">{getEmoji(hr.condition || hr.weather)}</div>
+                      <div className="text-sm font-bold">{hr.temp_c != null ? `${hr.temp_c}\u00B0` : '-'}</div>
+                      {hr.precip_prob != null && (
+                        <div className="text-xs text-cyan-400 mt-1">{'\uD83D\uDCA7'} {Math.round(hr.precip_prob)}%</div>
+                      )}
+                      {hr.wind_speed_kmh != null && (
+                        <div className="text-xs text-slate-400 mt-0.5">
+                          {hr.wind_speed_kmh} km/h
+                          {hr.wind_direction_deg != null && <span className="ml-0.5">{degToCompass(hr.wind_direction_deg)}</span>}
+                        </div>
+                      )}
+                      {hr.uv_index != null && (
+                        <div className="mt-1">
+                          <span className={`inline-block text-[10px] px-1.5 py-0.5 rounded-full font-bold text-white ${uvColor(hr.uv_index)}`}>
+                            UV {hr.uv_index}
+                          </span>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* Source comparison + Accuracy side by side */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <SourceComparisonChart forecast={forecast} />
+            <AccuracyPanel accuracy={accuracy} learnMode={learnMode} />
+          </div>
+
+          {/* Physics corrections detail */}
+          <PhysicsLog forecast={forecast} />
+        </div>
+      );
+    }
+
+    function MetricCard({ label, value, sub, className = 'bg-slate-800 border-slate-700' }) {
+      return (
+        <div className={`rounded-xl p-4 border ${className}`}>
+          <div className="text-xs text-slate-400 uppercase tracking-wide mb-1">{label}</div>
+          <div className="text-xl font-bold">{value}</div>
+          {sub && <div className="text-xs text-slate-500 mt-1">{sub}</div>}
+        </div>
+      );
+    }
+
+    // =====================================================================
+    // LOADING SKELETON
+    // =====================================================================
+    function ForecastSkeleton() {
+      return (
+        <div className="max-w-7xl mx-auto p-6 space-y-6">
+          {/* Header skeleton */}
+          <div className="space-y-2">
+            <div className="h-8 w-48 bg-slate-700 rounded animate-pulse" />
+            <div className="h-4 w-72 bg-slate-700/60 rounded animate-pulse" />
+          </div>
+          {/* Metric cards skeleton */}
+          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+            {[...Array(6)].map((_, i) => (
+              <div key={i} className="rounded-xl p-4 border bg-slate-800 border-slate-700">
+                <div className="h-3 w-16 bg-slate-700 rounded animate-pulse mb-2" />
+                <div className="h-6 w-20 bg-slate-700 rounded animate-pulse mb-1" />
+                <div className="h-3 w-12 bg-slate-700/60 rounded animate-pulse" />
+              </div>
+            ))}
+          </div>
+          {/* Table skeleton */}
+          <div className="bg-slate-800 rounded-xl border border-slate-700 p-5 space-y-3">
+            <div className="h-5 w-48 bg-slate-700 rounded animate-pulse" />
+            {[...Array(7)].map((_, i) => (
+              <div key={i} className="flex gap-4 items-center">
+                <div className="h-4 w-24 bg-slate-700/60 rounded animate-pulse" />
+                <div className="h-4 w-8 bg-slate-700/60 rounded animate-pulse" />
+                <div className="h-4 w-12 bg-slate-700/60 rounded animate-pulse" />
+                <div className="h-4 w-12 bg-slate-700/60 rounded animate-pulse" />
+                <div className="h-4 w-10 bg-slate-700/60 rounded animate-pulse" />
+                <div className="h-4 w-10 bg-slate-700/60 rounded animate-pulse" />
+                <div className="flex-1 h-4 bg-slate-700/40 rounded animate-pulse" />
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // =====================================================================
+    // SOURCE COMPARISON CHART
+    // =====================================================================
+    function SourceComparisonChart({ forecast }) {
+      const canvasRef = useRef(null);
+      const chartRef = useRef(null);
+
+      useEffect(() => {
+        if (!forecast?.daily?.[0]?.per_source) return;
+        const today = forecast.daily[0];
+        const sources = Object.keys(today.per_source);
+        const colors = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6'];
+
+        const highs = sources.map(s => today.per_source[s]?.high_c);
+        const lows = sources.map(s => today.per_source[s]?.low_c);
+
+        if (chartRef.current) chartRef.current.destroy();
+        chartRef.current = new Chart(canvasRef.current, {
+          type: 'bar',
+          data: {
+            labels: sources,
+            datasets: [
+              { label: 'High \u00B0C', data: highs, backgroundColor: colors.map(c => c + '99'), borderColor: colors, borderWidth: 1 },
+              { label: 'Low \u00B0C', data: lows, backgroundColor: colors.map(c => c + '44'), borderColor: colors, borderWidth: 1 },
+            ]
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+              legend: { labels: { color: '#94a3b8', font: { size: 11 } } },
+              title: { display: true, text: `Today's Source Comparison`, color: '#e2e8f0', font: { size: 14 } },
+            },
+            scales: {
+              x: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } },
+              y: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' }, title: { display: true, text: '\u00B0C', color: '#94a3b8' } },
+            }
+          }
+        });
+        return () => { if (chartRef.current) chartRef.current.destroy(); };
+      }, [forecast]);
+
+      return (
+        <div className="bg-slate-800 rounded-xl border border-slate-700 p-5">
+          <div className="chart-container"><canvas ref={canvasRef} /></div>
+        </div>
+      );
+    }
+
+    // =====================================================================
+    // ACCURACY PANEL
+    // =====================================================================
+    function AccuracyPanel({ accuracy, learnMode }) {
+      if (!accuracy?.sources) return null;
+      const sources = accuracy.sources;
+      const sourceNames = Object.keys(sources);
+      const metrics = ['temp_high', 'temp_low', 'precip_mm', 'wind', 'condition'];
+
+      return (
+        <div className="bg-slate-800 rounded-xl border border-slate-700 p-5">
+          <h3 className="font-semibold mb-4"><LearnTip id="source_weight" learnMode={learnMode}>Source Weights & Accuracy</LearnTip></h3>
+          {sourceNames.length === 0 ? (
+            <p className="text-slate-400 text-sm">No accuracy data yet. Run verify_and_score.py to compute weights.</p>
+          ) : (
+            <div className="space-y-4">
+              {sourceNames.map(source => (
+                <div key={source}>
+                  <div className="text-sm font-medium mb-2">{source}</div>
+                  <div className="space-y-1.5">
+                    {metrics.map(metric => {
+                      const data = sources[source]?.[metric];
+                      if (!data) return null;
+                      const weight = data.weight || 0;
+                      return (
+                        <div key={metric} className="flex items-center gap-2 text-xs">
+                          <span className="w-20 text-slate-400">{metric}</span>
+                          <div className="flex-1 bg-slate-700 rounded-full h-2.5 overflow-hidden">
+                            <div className="h-full rounded-full bg-gradient-to-r from-blue-500 to-cyan-400 transition-all"
+                              style={{ width: `${weight * 100}%` }} />
+                          </div>
+                          <span className="w-12 text-right font-mono">{(weight * 100).toFixed(1)}%</span>
+                          <span className="w-20 text-right text-slate-500">
+                            <LearnTip id="mae" learnMode={learnMode}>{data.mae != null ? `MAE ${data.mae.toFixed(2)}` : data.accuracy_pct != null ? `${data.accuracy_pct}% acc` : ''}</LearnTip>
+                          </span>
+                          <span className="w-12 text-right text-slate-600"><LearnTip id="sample_count" learnMode={learnMode}>n={data.sample_count || 0}</LearnTip></span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    // =====================================================================
+    // PHYSICS LOG
+    // =====================================================================
+    function PhysicsLog({ forecast }) {
+      const allCorrections = forecast.daily?.flatMap(d =>
+        (d.physics_corrections || []).map(c => ({ date: d.date, correction: c }))
+      ) || [];
+
+      if (allCorrections.length === 0) return null;
+
+      return (
+        <div className="bg-slate-800 rounded-xl border border-slate-700 p-5">
+          <h3 className="font-semibold mb-3">{'\u2699\uFE0F'} Layer 2: Meteorological Physics Corrections</h3>
+          <div className="space-y-2">
+            {allCorrections.map((item, i) => (
+              <div key={i} className="flex gap-3 text-sm">
+                <span className="text-slate-500 font-mono w-24 flex-shrink-0">
+                  {new Date(item.date + 'T00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                </span>
+                <span className="text-yellow-400/80">{item.correction}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    }
+
+    // =====================================================================
+    // TRENDS VIEW
+    // =====================================================================
+    function TrendsView({ city }) {
+      const [trends, setTrends] = useState(null);
+      const [loading, setLoading] = useState(true);
+
+      useEffect(() => {
+        setLoading(true);
+        api.getTrends(city.id, 30).then(data => {
+          setTrends(data);
+          setLoading(false);
+        }).catch(() => setLoading(false));
+      }, [city.id]);
+
+      if (loading) return (
+        <div className="max-w-7xl mx-auto p-6 space-y-6">
+          <div className="h-8 w-56 bg-slate-700 rounded animate-pulse" />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {[...Array(4)].map((_, i) => (
+              <div key={i} className="bg-slate-800 rounded-xl border border-slate-700 p-5">
+                <div className="h-[250px] bg-slate-700/40 rounded animate-pulse" />
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+      if (!trends || trends.dates?.length === 0) return (
+        <div className="max-w-7xl mx-auto p-6">
+          <h2 className="text-2xl font-bold mb-2">{city.name} Trends</h2>
+          <p className="text-slate-400">No historical data yet. Run collect_forecasts.py and verify_and_score.py daily to build up data.</p>
+        </div>
+      );
+
+      return (
+        <div className="max-w-7xl mx-auto p-6 space-y-6 fade-in">
+          <h2 className="text-2xl font-bold">{city.name} &mdash; 30-Day Trends</h2>
+          <p className="text-slate-400 text-sm">{trends.dates.length} days of historical data</p>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <TrendChart
+              title="Temperature Trend"
+              labels={trends.dates}
+              datasets={[
+                { label: 'High \u00B0C', data: trends.temp_highs, borderColor: '#f97316', backgroundColor: '#f9731633' },
+                { label: 'Low \u00B0C', data: trends.temp_lows, borderColor: '#3b82f6', backgroundColor: '#3b82f633' },
+              ]}
+              yLabel="\u00B0C"
+            />
+            <TrendChart
+              title="Precipitation"
+              labels={trends.dates}
+              datasets={[
+                { label: 'Precip (mm)', data: trends.precip, borderColor: '#06b6d4', backgroundColor: '#06b6d433', fill: true },
+              ]}
+              yLabel="mm"
+              chartType="bar"
+            />
+            <TrendChart
+              title="Barometric Pressure"
+              labels={trends.dates}
+              datasets={[
+                { label: 'Pressure (hPa)', data: trends.pressure, borderColor: '#a78bfa', backgroundColor: '#a78bfa33' },
+              ]}
+              yLabel="hPa"
+            />
+            <TrendChart
+              title="Humidity"
+              labels={trends.dates}
+              datasets={[
+                { label: 'Humidity (%)', data: trends.humidity, borderColor: '#34d399', backgroundColor: '#34d39933', fill: true },
+              ]}
+              yLabel="%"
+            />
+          </div>
+
+          {/* Source error trends */}
+          {Object.keys(trends.source_errors || {}).length > 0 && (
+            <div className="bg-slate-800 rounded-xl border border-slate-700 p-5">
+              <h3 className="font-semibold mb-4">{'\uD83C\uDFAF'} Source Accuracy Over Time (Temp High Error)</h3>
+              <SourceErrorChart sourceErrors={trends.source_errors} />
+            </div>
+          )}
+        </div>
+      );
+    }
+
+    function TrendChart({ title, labels, datasets, yLabel, chartType = 'line' }) {
+      const canvasRef = useRef(null);
+      const chartRef = useRef(null);
+
+      useEffect(() => {
+        if (chartRef.current) chartRef.current.destroy();
+
+        const shortLabels = labels.map(d => {
+          const dt = new Date(d + 'T00:00');
+          return dt.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
+        });
+
+        chartRef.current = new Chart(canvasRef.current, {
+          type: chartType,
+          data: {
+            labels: shortLabels,
+            datasets: datasets.map(ds => ({
+              ...ds,
+              tension: 0.3,
+              borderWidth: 2,
+              pointRadius: 2,
+              pointHoverRadius: 5,
+            }))
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+              title: { display: true, text: title, color: '#e2e8f0', font: { size: 14 } },
+              legend: { labels: { color: '#94a3b8', font: { size: 11 } } },
+            },
+            scales: {
+              x: { ticks: { color: '#94a3b8', maxRotation: 45, font: { size: 10 } }, grid: { color: '#1e293b' } },
+              y: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' }, title: { display: true, text: yLabel, color: '#94a3b8' } },
+            }
+          }
+        });
+        return () => { if (chartRef.current) chartRef.current.destroy(); };
+      }, [labels, datasets, title, yLabel, chartType]);
+
+      return (
+        <div className="bg-slate-800 rounded-xl border border-slate-700 p-5">
+          <div className="chart-container"><canvas ref={canvasRef} /></div>
+        </div>
+      );
+    }
+
+    function SourceErrorChart({ sourceErrors }) {
+      const canvasRef = useRef(null);
+      const chartRef = useRef(null);
+
+      useEffect(() => {
+        if (chartRef.current) chartRef.current.destroy();
+        const colors = { 'Open-Meteo': '#3b82f6', 'wttr.in': '#10b981', 'OpenWeatherMap': '#f59e0b', 'WeatherAPI': '#ef4444' };
+
+        const datasets = Object.entries(sourceErrors).map(([source, errors]) => ({
+          label: source,
+          data: errors.map(e => ({ x: e.date, y: e.error })),
+          borderColor: colors[source] || '#94a3b8',
+          backgroundColor: (colors[source] || '#94a3b8') + '33',
+          tension: 0.3, borderWidth: 2, pointRadius: 3,
+        }));
+
+        // Get all unique dates
+        const allDates = [...new Set(Object.values(sourceErrors).flat().map(e => e.date))].sort();
+        const shortLabels = allDates.map(d => new Date(d + 'T00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' }));
+
+        // Remap data to align with common x-axis
+        const alignedDatasets = Object.entries(sourceErrors).map(([source, errors]) => {
+          const errorMap = Object.fromEntries(errors.map(e => [e.date, e.error]));
+          return {
+            label: source,
+            data: allDates.map(d => errorMap[d] ?? null),
+            borderColor: colors[source] || '#94a3b8',
+            backgroundColor: (colors[source] || '#94a3b8') + '33',
+            tension: 0.3, borderWidth: 2, pointRadius: 3, spanGaps: true,
+          };
+        });
+
+        chartRef.current = new Chart(canvasRef.current, {
+          type: 'line',
+          data: { labels: shortLabels, datasets: alignedDatasets },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+              legend: { labels: { color: '#94a3b8' } },
+            },
+            scales: {
+              x: { ticks: { color: '#94a3b8', maxRotation: 45, font: { size: 10 } }, grid: { color: '#1e293b' } },
+              y: { ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' }, title: { display: true, text: 'Error (\u00B0C)', color: '#94a3b8' }, beginAtZero: true },
+            }
+          }
+        });
+        return () => { if (chartRef.current) chartRef.current.destroy(); };
+      }, [sourceErrors]);
+
+      return <div className="chart-container"><canvas ref={canvasRef} /></div>;
+    }
+
+    // =====================================================================
+    // SEASONAL VIEW
+    // =====================================================================
+    const phaseColor = {
+      strong_el_nino: 'text-red-400', moderate_el_nino: 'text-orange-400', weak_el_nino: 'text-yellow-400',
+      strong_la_nina: 'text-blue-400', moderate_la_nina: 'text-cyan-400', weak_la_nina: 'text-teal-400',
+      neutral: 'text-slate-400', positive: 'text-emerald-400', negative: 'text-rose-400',
+      warm: 'text-orange-400', cool: 'text-blue-400',
+      westerly: 'text-green-400', easterly: 'text-amber-400', unknown: 'text-slate-500',
+    };
+    const phaseBg = {
+      strong_el_nino: 'bg-red-500/15 border-red-500/30', moderate_el_nino: 'bg-orange-500/15 border-orange-500/30',
+      weak_el_nino: 'bg-yellow-500/15 border-yellow-500/30',
+      strong_la_nina: 'bg-blue-500/15 border-blue-500/30', moderate_la_nina: 'bg-cyan-500/15 border-cyan-500/30',
+      weak_la_nina: 'bg-teal-500/15 border-teal-500/30',
+      neutral: 'bg-slate-700 border-slate-600', positive: 'bg-emerald-500/15 border-emerald-500/30',
+      negative: 'bg-rose-500/15 border-rose-500/30',
+      warm: 'bg-orange-500/15 border-orange-500/30', cool: 'bg-blue-500/15 border-blue-500/30',
+      westerly: 'bg-green-500/15 border-green-500/30', easterly: 'bg-amber-500/15 border-amber-500/30',
+      unknown: 'bg-slate-800 border-slate-700',
+    };
+
+    const indexLabels = {
+      oni: 'ENSO (ONI)', nao: 'NAO', ao: 'Arctic Osc.', pdo: 'PDO', amo: 'AMO',
+      pna: 'PNA', soi: 'SOI', qbo: 'QBO', dmi: 'IOD (DMI)', ea: 'East Atlantic',
+      scand: 'Scandinavian', wp: 'West Pacific',
+      tnh: 'Trop/NH', tna: 'Trop N. Atlantic', tsa: 'Trop S. Atlantic',
+      nino34: 'Nino 3.4', np: 'N. Pacific', aao: 'Antarctic Osc.',
+    };
+
+    const monthNames = ['', 'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+    function SeasonalView({ city, learnMode }) {
+      const [data, setData] = useState(null);
+      const [indices, setIndices] = useState(null);
+      const [loading, setLoading] = useState(true);
+      const [months, setMonths] = useState(3);
+      const [error, setError] = useState(null);
+
+      const loadData = useCallback((m) => {
+        setLoading(true);
+        setError(null);
+        Promise.all([
+          api.getSeasonal(city.id, m),
+          api.getIndices(),
+        ]).then(([s, idx]) => {
+          if (s.error) { setError(s.error); setLoading(false); return; }
+          setData(s);
+          setIndices(idx.indices || {});
+          setLoading(false);
+        }).catch(err => { setError(err.message); setLoading(false); });
+      }, [city.id]);
+
+      useEffect(() => { loadData(months); }, [city.id, months, loadData]);
+
+      if (loading) return (
+        <div className="flex flex-col items-center justify-center h-96 gap-4">
+          <div className="animate-spin w-8 h-8 border-2 border-purple-500 border-t-transparent rounded-full"></div>
+          <div className="text-slate-400">Loading seasonal outlook... This may take a moment on first run.</div>
+        </div>
+      );
+      if (error) return (
+        <div className="p-8 flex flex-col items-center gap-4">
+          <span className="text-red-400 text-lg">Error: {error}</span>
+          <button onClick={() => loadData(months)} className="bg-blue-600 hover:bg-blue-700 px-5 py-2 rounded-lg text-sm font-medium transition">
+            Retry
+          </button>
+        </div>
+      );
+      if (!data) return <div className="p-8 text-slate-400">No seasonal data available</div>;
+
+      const forecasts = data.monthly_forecasts || [];
+      const idxState = data.index_state || indices || {};
+      const tier1 = ['oni', 'nao', 'ao', 'pdo', 'amo', 'pna', 'soi'];
+      const tier2 = ['qbo', 'dmi', 'ea', 'eawr', 'scand', 'wp', 'epnp', 'tnh'];
+
+      return (
+        <div className="max-w-7xl mx-auto p-6 space-y-6 fade-in">
+          {/* Header */}
+          <div className="flex items-center justify-between flex-wrap gap-4">
+            <div>
+              <h2 className="text-3xl font-bold">{'\uD83C\uDF0D'} Seasonal Outlook</h2>
+              <p className="text-slate-400">{city.name}, {city.country}</p>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-slate-400">Forecast horizon:</span>
+              {[3, 6, 12].map(m => (
+                <button key={m} onClick={() => setMonths(m)}
+                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${months === m ? 'bg-purple-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'}`}>
+                  {m}mo
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Teleconnection Index Cards — Tier 1 */}
+          <div>
+            <h3 className="font-semibold text-sm text-slate-400 uppercase tracking-wide mb-3">Core Climate Indices</h3>
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-3">
+              {tier1.map(name => {
+                const info = idxState[name];
+                if (!info) return null;
+                const phase = info.phase || 'unknown';
+                return (
+                  <LearnTip key={name} id={name} learnMode={learnMode}>
+                    <div className={`rounded-xl p-3 border ${phaseBg[phase] || phaseBg.unknown}`}>
+                      <div className="text-xs text-slate-400 mb-1">{indexLabels[name] || name.toUpperCase()}</div>
+                      <div className={`text-lg font-bold ${phaseColor[phase] || phaseColor.unknown}`}>
+                        {info.value >= 0 ? '+' : ''}{info.value.toFixed(2)}
+                      </div>
+                      <div className="text-xs text-slate-500 mt-1 capitalize">{phase.replace(/_/g, ' ')}</div>
+                    </div>
+                  </LearnTip>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Tier 2 indices (collapsible) */}
+          <details className="group">
+            <summary className="cursor-pointer text-sm text-slate-400 hover:text-white transition">
+              {'\u25B6'} Regional & Specialized Indices ({Object.keys(idxState).filter(k => tier2.includes(k)).length} available)
+            </summary>
+            <div className="grid grid-cols-2 sm:grid-cols-4 md:grid-cols-4 lg:grid-cols-8 gap-2 mt-3">
+              {tier2.map(name => {
+                const info = idxState[name];
+                if (!info) return null;
+                const phase = info.phase || 'unknown';
+                return (
+                  <LearnTip key={name} id={name} learnMode={learnMode}>
+                    <div className={`rounded-lg p-2 border ${phaseBg[phase] || phaseBg.unknown}`}>
+                      <div className="text-[10px] text-slate-500">{indexLabels[name] || name.toUpperCase()}</div>
+                      <div className={`text-sm font-bold ${phaseColor[phase] || phaseColor.unknown}`}>
+                        {info.value >= 0 ? '+' : ''}{info.value.toFixed(2)}
+                      </div>
+                    </div>
+                  </LearnTip>
+                );
+              })}
+            </div>
+          </details>
+
+          {/* Monthly Outlook Table */}
+          <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
+            <div className="px-5 py-3 border-b border-slate-700 flex items-center justify-between">
+              <h3 className="font-semibold">{'\uD83D\uDCC5'} Monthly Outlook</h3>
+              <span className="text-xs text-slate-500">{months}-month forecast</span>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="text-slate-400 text-xs uppercase">
+                    <th className="px-5 py-3 text-left">Month</th>
+                    <th className="px-3 py-3 text-right"><LearnTip id="temp_anomaly" learnMode={learnMode}>Temp Anomaly</LearnTip></th>
+                    <th className="px-3 py-3 text-right"><LearnTip id="precip_anomaly" learnMode={learnMode}>Precip Anomaly</LearnTip></th>
+                    <th className="px-3 py-3 text-center"><LearnTip id="seasonal_confidence" learnMode={learnMode}>Confidence</LearnTip></th>
+                    <th className="px-5 py-3 text-left"><LearnTip id="tercile_probs" learnMode={learnMode}>Tercile Probability</LearnTip></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {forecasts.map((fc, i) => {
+                    const temp = fc.temp_anomaly_c;
+                    const precip = fc.precip_anomaly_pct;
+                    const conf = fc.confidence;
+                    const tp = fc.tercile_probs || {};
+                    const bn = (tp.below_normal || 0.333) * 100;
+                    const nn = (tp.near_normal || 0.334) * 100;
+                    const an = (tp.above_normal || 0.333) * 100;
+                    const confLabel = conf >= 0.6 ? 'HIGH' : conf >= 0.3 ? 'MODERATE' : 'LOW';
+                    const confCls = conf >= 0.6 ? 'text-emerald-400' : conf >= 0.3 ? 'text-yellow-400' : 'text-red-400';
+
+                    return (
+                      <tr key={i} className="border-t border-slate-700/50">
+                        <td className="px-5 py-3 font-medium">
+                          {monthNames[fc.target_month]} {fc.target_year}
+                        </td>
+                        <td className={`px-3 py-3 text-right font-bold ${temp != null ? (temp > 0 ? 'text-orange-400' : temp < 0 ? 'text-blue-400' : 'text-slate-300') : 'text-slate-500'}`}>
+                          {temp != null ? `${temp > 0 ? '+' : ''}${temp.toFixed(1)}\u00B0C` : 'N/A'}
+                        </td>
+                        <td className={`px-3 py-3 text-right font-medium ${precip != null ? (precip > 0 ? 'text-cyan-400' : precip < 0 ? 'text-amber-400' : 'text-slate-300') : 'text-slate-500'}`}>
+                          {precip != null ? `${precip > 0 ? '+' : ''}${precip.toFixed(0)}%` : 'N/A'}
+                        </td>
+                        <td className={`px-3 py-3 text-center text-xs font-semibold ${confCls}`}>
+                          {confLabel}
+                        </td>
+                        <td className="px-5 py-3">
+                          <div className="flex items-center gap-1.5">
+                            <div className="flex-1 flex h-4 rounded-full overflow-hidden text-[10px] font-bold">
+                              <div className="bg-blue-500/70 flex items-center justify-center text-white" style={{width: `${bn}%`}}>
+                                {bn >= 15 ? `${bn.toFixed(0)}` : ''}
+                              </div>
+                              <div className="bg-slate-500/50 flex items-center justify-center text-white" style={{width: `${nn}%`}}>
+                                {nn >= 15 ? `${nn.toFixed(0)}` : ''}
+                              </div>
+                              <div className="bg-red-500/70 flex items-center justify-center text-white" style={{width: `${an}%`}}>
+                                {an >= 15 ? `${an.toFixed(0)}` : ''}
+                              </div>
+                            </div>
+                            <span className="text-[10px] text-slate-500 w-16">BN|NN|AN</span>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Method Breakdown & Analog Years side by side */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* Method Weights */}
+            {forecasts[0]?.method_weights && (
+              <div className="bg-slate-800 rounded-xl border border-slate-700 p-5">
+                <h3 className="font-semibold mb-4"><LearnTip id="bma" learnMode={learnMode}>{'\u2696\uFE0F'} Method Weights (BMA)</LearnTip></h3>
+                <div className="space-y-3">
+                  {Object.entries(forecasts[0].method_weights).map(([method, weight]) => (
+                    <div key={method} className="flex items-center gap-3">
+                      <span className="w-28 text-sm text-slate-300 capitalize"><LearnTip id={method === 'ecmwf_seas5' ? 'ecmwf_seas5' : method === 'ridge_regression' ? 'ridge_regression' : method} learnMode={learnMode}>{method.replace('_', ' ')}</LearnTip></span>
+                      <div className="flex-1 bg-slate-700 rounded-full h-3 overflow-hidden">
+                        <div className="h-full rounded-full bg-gradient-to-r from-purple-500 to-pink-400 transition-all"
+                          style={{ width: `${weight * 100}%` }} />
+                      </div>
+                      <span className="w-14 text-right text-sm font-mono text-slate-400">{(weight * 100).toFixed(1)}%</span>
+                    </div>
+                  ))}
+                </div>
+                {/* Individual method forecasts */}
+                {forecasts[0]?.individual_methods && (
+                  <div className="mt-4 pt-4 border-t border-slate-700">
+                    <div className="text-xs text-slate-500 uppercase tracking-wide mb-2">Individual Predictions (Month 1)</div>
+                    <div className="space-y-1.5">
+                      {forecasts[0].individual_methods.filter(m => m.temp_anomaly_c != null).map(m => (
+                        <div key={m.method} className="flex items-center justify-between text-sm">
+                          <span className="text-slate-400 capitalize">{m.method.replace('_', ' ')}</span>
+                          <span className={m.temp_anomaly_c > 0 ? 'text-orange-400' : m.temp_anomaly_c < 0 ? 'text-blue-400' : 'text-slate-300'}>
+                            {m.temp_anomaly_c > 0 ? '+' : ''}{m.temp_anomaly_c.toFixed(2)}{'\u00B0'}C
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Analog Years */}
+            <div className="bg-slate-800 rounded-xl border border-slate-700 p-5">
+              <h3 className="font-semibold mb-4"><LearnTip id="analog" learnMode={learnMode}>{'\uD83D\uDD0D'} Closest Analog Years</LearnTip></h3>
+              {(() => {
+                const analogMethod = forecasts[0]?.individual_methods?.find(m => m.method === 'analog');
+                if (!analogMethod?.analogs?.length) return <p className="text-slate-500 text-sm">No analog data available</p>;
+                return (
+                  <div className="space-y-2">
+                    {analogMethod.analogs.map((a, i) => (
+                      <div key={a.year} className="flex items-center gap-3">
+                        <span className={`text-lg font-bold ${i === 0 ? 'text-purple-400' : 'text-slate-300'}`}>{a.year}</span>
+                        <div className="flex-1 bg-slate-700 rounded-full h-2 overflow-hidden">
+                          <div className="h-full rounded-full bg-gradient-to-r from-purple-500 to-blue-400"
+                            style={{ width: `${Math.max(5, 100 - a.distance * 30)}%` }} />
+                        </div>
+                        <LearnTip id="analog_distance" learnMode={learnMode}><span className="text-xs text-slate-500 w-20 text-right">d={a.distance.toFixed(3)}</span></LearnTip>
+                      </div>
+                    ))}
+                    <p className="text-xs text-slate-600 mt-2">
+                      {analogMethod.num_analogs_used} analogs evaluated. Lower distance = closer match to current teleconnection state.
+                    </p>
+                  </div>
+                );
+              })()}
+            </div>
+          </div>
+
+          {/* Tercile Probability Chart */}
+          {forecasts.length > 0 && <SeasonalTercileChart forecasts={forecasts} />}
+        </div>
+      );
+    }
+
+    function SeasonalTercileChart({ forecasts }) {
+      const canvasRef = useRef(null);
+      const chartRef = useRef(null);
+
+      useEffect(() => {
+        if (chartRef.current) chartRef.current.destroy();
+        const labels = forecasts.map(fc => `${monthNames[fc.target_month]} ${fc.target_year}`);
+        const bn = forecasts.map(fc => ((fc.tercile_probs?.below_normal || 0.333) * 100).toFixed(1));
+        const nn = forecasts.map(fc => ((fc.tercile_probs?.near_normal || 0.334) * 100).toFixed(1));
+        const an = forecasts.map(fc => ((fc.tercile_probs?.above_normal || 0.333) * 100).toFixed(1));
+
+        chartRef.current = new Chart(canvasRef.current, {
+          type: 'bar',
+          data: {
+            labels,
+            datasets: [
+              { label: 'Below Normal', data: bn, backgroundColor: '#3b82f6aa', borderColor: '#3b82f6', borderWidth: 1 },
+              { label: 'Near Normal', data: nn, backgroundColor: '#64748baa', borderColor: '#64748b', borderWidth: 1 },
+              { label: 'Above Normal', data: an, backgroundColor: '#ef4444aa', borderColor: '#ef4444', borderWidth: 1 },
+            ]
+          },
+          options: {
+            responsive: true, maintainAspectRatio: false,
+            plugins: {
+              title: { display: true, text: 'Temperature Tercile Probabilities', color: '#e2e8f0', font: { size: 14 } },
+              legend: { labels: { color: '#94a3b8', font: { size: 11 } } },
+            },
+            scales: {
+              x: { stacked: true, ticks: { color: '#94a3b8' }, grid: { color: '#1e293b' } },
+              y: { stacked: true, max: 100, ticks: { color: '#94a3b8', callback: v => v + '%' }, grid: { color: '#1e293b' },
+                   title: { display: true, text: 'Probability %', color: '#94a3b8' } },
+            }
+          }
+        });
+        return () => { if (chartRef.current) chartRef.current.destroy(); };
+      }, [forecasts]);
+
+      return (
+        <div className="bg-slate-800 rounded-xl border border-slate-700 p-5">
+          <div className="chart-container"><canvas ref={canvasRef} /></div>
+        </div>
+      );
+    }
+
+    // =====================================================================
+    // RENDER
+    // =====================================================================
+    const root = ReactDOM.createRoot(document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
