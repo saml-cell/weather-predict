@@ -113,6 +113,11 @@ def add_city():
     if not location:
         return jsonify({"error": f"Could not find city: {city_name}"}), 404
 
+    # Check if already tracked
+    existing = db.get_city(location["name"])
+    if existing:
+        return jsonify({**existing, "already_tracked": True}), 200
+
     city_id = db.insert_city(
         name=location["name"],
         country=location["country"],
@@ -121,7 +126,79 @@ def add_city():
         timezone=location.get("timezone", "auto"),
     )
     city = db.get_city_by_id(city_id)
-    return jsonify(city), 201
+
+    # Update config.json default_cities list
+    _add_city_to_config(location["name"])
+
+    # Trigger background initial fetch
+    import threading
+    def _initial_fetch(cid, name, lat, lon):
+        try:
+            from collect_forecasts import fetch_all_sources, store_forecasts
+            from datetime import datetime, timezone as tz
+            logger.info("Initial fetch for new city: %s", name)
+            results = fetch_all_sources(city)
+            store_forecasts(cid, results, datetime.now(tz.utc).isoformat())
+            logger.info("Initial fetch done for %s: %d sources", name, len(results))
+        except Exception as e:
+            logger.error("Initial fetch failed for %s: %s", name, e)
+    threading.Thread(target=_initial_fetch, args=(city_id, location["name"], location["lat"], location["lon"]), daemon=True).start()
+
+    logger.info("New city added: %s (%s) id=%d", location["name"], location["country"], city_id)
+    return jsonify({**city, "just_added": True}), 201
+
+
+def _add_city_to_config(city_name):
+    """Add city to config.json default_cities if not already there."""
+    try:
+        config_path = os.path.join(_PROJECT_DIR, "config.json")
+        with open(config_path) as f:
+            config = json.load(f)
+        cities = config.get("default_cities", [])
+        if city_name not in cities:
+            cities.append(city_name)
+            config["default_cities"] = cities
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+            logger.info("Added %s to config.json default_cities", city_name)
+    except Exception as e:
+        logger.error("Failed to update config.json: %s", e)
+
+
+@app.route("/api/cities/<int:city_id>", methods=["DELETE"])
+def remove_city(city_id):
+    """Remove a city from tracking."""
+    city = db.get_city_by_id(city_id)
+    if not city:
+        return jsonify({"error": "City not found"}), 404
+
+    conn = db.get_connection()
+    conn.execute("DELETE FROM forecasts WHERE city_id = ?", (city_id,))
+    conn.execute("DELETE FROM observations WHERE city_id = ?", (city_id,))
+    conn.execute("DELETE FROM source_accuracy WHERE city_id = ?", (city_id,))
+    conn.execute("DELETE FROM climatology WHERE city_id = ?", (city_id,))
+    conn.execute("DELETE FROM seasonal_forecasts WHERE city_id = ?", (city_id,))
+    conn.execute("DELETE FROM seasonal_skill WHERE city_id = ?", (city_id,))
+    conn.execute("DELETE FROM cities WHERE id = ?", (city_id,))
+    conn.commit()
+
+    # Remove from config.json
+    try:
+        config_path = os.path.join(_PROJECT_DIR, "config.json")
+        with open(config_path) as f:
+            config = json.load(f)
+        cities = config.get("default_cities", [])
+        if city["name"] in cities:
+            cities.remove(city["name"])
+            config["default_cities"] = cities
+            with open(config_path, "w") as f:
+                json.dump(config, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+    invalidate_forecast_cache(city["name"])
+    logger.info("Removed city: %s (id=%d)", city["name"], city_id)
+    return jsonify({"status": "removed", "city": city})
 
 # ---------------------------------------------------------------------------
 # API: Forecast
