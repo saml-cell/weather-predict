@@ -13,12 +13,12 @@ import json
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db
 from db import normalize_condition
-from fetch_weather import fetch_open_meteo, fetch_wttr, fetch_openweather, fetch_weatherapi
+from fetch_weather import fetch_open_meteo, fetch_wttr, fetch_openweather, fetch_weatherapi, fetch_visual_crossing
 
 
 def fetch_all_sources(city):
@@ -28,12 +28,13 @@ def fetch_all_sources(city):
     name = city["name"]
 
     results = []
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {
             pool.submit(fetch_open_meteo, lat, lon, tz): "Open-Meteo",
             pool.submit(fetch_wttr, name): "wttr.in",
             pool.submit(fetch_openweather, lat, lon): "OpenWeatherMap",
             pool.submit(fetch_weatherapi, lat, lon): "WeatherAPI",
+            pool.submit(fetch_visual_crossing, lat, lon): "VisualCrossing",
         }
         for future in as_completed(futures):
             source = futures[future]
@@ -84,7 +85,7 @@ def collect_all(city_filter=None):
             print(f"City not found in database: {city_filter}")
             sys.exit(1)
 
-    fetched_at = datetime.utcnow().isoformat()
+    fetched_at = datetime.now(timezone.utc).isoformat()
     total_rows = 0
     total_sources = 0
 

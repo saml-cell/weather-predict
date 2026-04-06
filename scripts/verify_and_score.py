@@ -14,10 +14,13 @@ Or with a specific date:
 """
 
 import json
+import logging
 import math
 import os
 import sys
 from datetime import date, datetime, timedelta, timezone
+
+logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db

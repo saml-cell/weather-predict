@@ -25,7 +25,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db
 from db import normalize_condition
 from fetch_weather import (
-    geocode, fetch_open_meteo, fetch_wttr, fetch_openweather, fetch_weatherapi, WMO_CODES, c_to_f
+    geocode, fetch_open_meteo, fetch_wttr, fetch_openweather, fetch_weatherapi,
+    fetch_visual_crossing, WMO_CODES, c_to_f
 )
 from meteo import apply_physics_corrections, dew_point, dew_point_depression, feels_like
 
@@ -106,12 +107,13 @@ def fetch_all_sources(city):
 
     results = []
     source_status = {}
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {
             pool.submit(fetch_open_meteo, lat, lon, tz): "Open-Meteo",
             pool.submit(fetch_wttr, name): "wttr.in",
             pool.submit(fetch_openweather, lat, lon): "OpenWeatherMap",
             pool.submit(fetch_weatherapi, lat, lon): "WeatherAPI",
+            pool.submit(fetch_visual_crossing, lat, lon): "VisualCrossing",
         }
         for future in as_completed(futures):
             source = futures[future]

@@ -18,7 +18,7 @@ import argparse
 import json
 import os
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db
@@ -175,7 +175,7 @@ def generate_narrative(current_state, city_lat, target_season):
 # ===================================================================
 def format_text_output(city, forecasts, index_state, months_ahead):
     """Format seasonal forecast as human-readable text."""
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     current_month = now.month
     current_year = now.year
 
@@ -310,7 +310,7 @@ def format_json_output(city, forecasts, index_state, months_ahead):
             "lat": city["lat"],
             "lon": city["lon"],
         },
-        "generated_at": datetime.utcnow().isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "months_ahead": months_ahead,
         "index_state": index_state,
         "monthly_forecasts": forecasts,
@@ -365,7 +365,7 @@ def produce_seasonal_forecast(city_name, months_ahead=3, force_update=False):
         index_series_cache[idx_name] = db.get_climate_index_series(idx_name)
 
     # 6. Run forecasts for each target month
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     monthly_forecasts = []
 
     for lead in range(1, months_ahead + 1):

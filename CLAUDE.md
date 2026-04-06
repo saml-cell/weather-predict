@@ -11,26 +11,32 @@ A **production weather intelligence system** combining:
 - **Bayesian accuracy weighting** with daily verification
 - **Physics-informed corrections** (dew point, pressure trends)
 - **React dashboard** with Flask API backend
+- **Alert notification system** (webhook, file log, stdout)
 
 ## Architecture
 
 ```
 scripts/
-  fetch_weather.py      — Multi-source API data collection
+  fetch_weather.py      — Multi-source API data collection (5 sources)
   climate_indices.py    — NOAA teleconnection index downloader
   seasonal_model.py     — 4 ML prediction models + BMA
   seasonal_forecast.py  — Forecast generation pipeline
   weighted_forecast.py  — Bayesian consensus forecasting
   meteo.py              — Meteorological physics engine
   verify_and_score.py   — Accuracy verification & scoring
-  db.py                 — SQLite database layer
+  alerts.py             — Weather alert detection & notification
+  db.py                 — SQLite database layer (thread-local pooling)
   api.py                — Flask REST API server
-  orchestrate.py        — Pipeline orchestrator
+  orchestrate.py        — Pipeline orchestrator (parallel city processing)
   init_db.py            — Database initialization
   add_city.py           — City management
   collect_forecasts.py  — Data collection orchestrator
+  __init__.py           — Package marker
 dashboard/
   index.html            — React 18 SPA (Tailwind, Leaflet, Chart.js)
+tests/
+  test_meteo.py         — Physics module unit tests
+  test_db.py            — Database layer tests
 data/
   weather.db            — SQLite database
 config.json             — All configuration (APIs, scoring, physics, models)
@@ -43,14 +49,15 @@ config.json             — All configuration (APIs, scoring, physics, models)
 2. Download NOAA climate indices  → 18+ teleconnection indices
 3. Run 4 ML models + BMA         → Generate seasonal predictions
 4. Compare vs actual observations → Update Bayesian accuracy weights
-5. Serve Flask API + dashboard    → http://localhost:5000
+5. Check alerts                   → Notify on extreme weather
+6. Serve Flask API + dashboard    → http://localhost:5000
 ```
 
 ## Behavioral Rules
 
 - ALWAYS read a file before editing it
 - NEVER save working files to root folder
-- Use `scripts/` for Python code, `dashboard/` for frontend
+- Use `scripts/` for Python code, `dashboard/` for frontend, `tests/` for tests
 - NEVER commit API keys or secrets
 - Run `python scripts/init_db.py` before first use
 - The database is `data/weather.db` — do not delete it
@@ -70,6 +77,9 @@ python scripts/orchestrate.py --step all
 # 4. Start API server + dashboard
 python scripts/api.py
 # → http://localhost:5000
+
+# Production: use gunicorn
+gunicorn -w 2 -b 0.0.0.0:5000 scripts.api:app
 ```
 
 ## Running Full-Time (cron + systemd)
@@ -77,6 +87,7 @@ python scripts/api.py
 ```bash
 # Data collection every 6 hours
 0 */6 * * * cd "/home/samko/Weather predict program" && python3 scripts/orchestrate.py --step fetch
+30 */6 * * * cd "/home/samko/Weather predict program" && python3 scripts/collect_forecasts.py
 
 # Verify & score daily at midnight
 0 0 * * * cd "/home/samko/Weather predict program" && python3 scripts/verify_and_score.py
@@ -84,8 +95,33 @@ python scripts/api.py
 # NOAA indices weekly (Sunday 3am)
 0 3 * * 0 cd "/home/samko/Weather predict program" && python3 scripts/climate_indices.py --force
 
+# Check alerts after each fetch
+15 */6 * * * cd "/home/samko/Weather predict program" && python3 scripts/alerts.py
+
 # Dashboard API runs as systemd user service: weather-api.service
 ```
+
+## Running Tests
+
+```bash
+cd "/home/samko/Weather predict program"
+python -m pytest tests/ -v
+```
+
+## API Endpoints
+
+- `GET /api/cities` — List tracked cities
+- `POST /api/cities` — Add a city
+- `GET /api/forecast/<city_id>` — Weighted ensemble forecast
+- `GET /api/observations/<city_id>` — Historical observations
+- `GET /api/accuracy/<city_id>` — Source accuracy weights
+- `GET /api/trends/<city_id>` — Time-series trends
+- `GET /api/compare/<city_id>` — Source comparison for today
+- `GET /api/seasonal/<city_id>` — Seasonal outlook
+- `GET /api/indices` — Current teleconnection state
+- `GET /api/alerts` — Weather alerts (optional `?city_id=N`)
+- `POST /api/cache/invalidate` — Clear forecast cache
+- `GET /api/health` — System health check
 
 ## Key Configuration (config.json)
 
@@ -95,3 +131,9 @@ python scripts/api.py
 - `physics.max_precip_adjustment_pct`: Max physics correction for precipitation
 - `seasonal.indices`: NOAA climate index URLs and parameters
 - `seasonal.bma`: Bayesian Model Averaging weights
+
+## Environment Variables (optional)
+
+- `OPENWEATHER_API_KEY` — OpenWeatherMap free tier
+- `WEATHERAPI_KEY` — WeatherAPI.com free tier
+- `VISUAL_CROSSING_KEY` — Visual Crossing free tier

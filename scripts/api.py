@@ -10,6 +10,7 @@ Usage:
 """
 
 import json
+import logging
 import os
 import sys
 import time
@@ -19,6 +20,13 @@ from datetime import date, timedelta, datetime, timezone
 from flask import Flask, jsonify, request, send_from_directory
 from flask_cors import CORS
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db
 from db import normalize_condition
@@ -27,6 +35,7 @@ from weighted_forecast import produce_forecast
 from meteo import dew_point, dew_point_depression, pressure_stability_index
 from seasonal_forecast import produce_seasonal_forecast, format_json_output
 from climate_indices import get_current_index_state, fetch_all_indices, build_climatology
+from alerts import check_city_alerts
 
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DASHBOARD_DIR = os.path.join(_PROJECT_DIR, "dashboard")
@@ -57,6 +66,16 @@ def _check_rate_limit(ip):
 # ---------------------------------------------------------------------------
 _forecast_cache = {}  # city_name -> (timestamp, result)
 _FORECAST_TTL = 1800  # 30 minutes
+
+
+def invalidate_forecast_cache(city_name=None):
+    """Clear forecast cache. If city_name given, only that city; else all."""
+    if city_name:
+        _forecast_cache.pop(city_name, None)
+        logger.info("Cache invalidated for %s", city_name)
+    else:
+        _forecast_cache.clear()
+        logger.info("All forecast cache cleared")
 
 # ---------------------------------------------------------------------------
 # Static frontend
@@ -212,8 +231,6 @@ def get_trends(city_id):
             "error": round(row["error"], 2),
         })
 
-    conn.close()
-
     return jsonify({
         "city": city,
         "dates": dates_list,
@@ -307,6 +324,34 @@ def build_city_climatology(city_id):
 
 
 # ---------------------------------------------------------------------------
+# API: Alerts
+# ---------------------------------------------------------------------------
+@app.route("/api/alerts", methods=["GET"])
+def get_alerts():
+    """Return weather alerts for all cities or a specific city."""
+    city_id = request.args.get("city_id", type=int)
+    cities = db.get_all_cities()
+    if city_id:
+        cities = [c for c in cities if c["id"] == city_id]
+
+    all_alerts = []
+    for city in cities:
+        alerts = check_city_alerts(city["id"], city["name"])
+        all_alerts.extend(alerts)
+
+    return jsonify({"alerts": all_alerts, "count": len(all_alerts)})
+
+# ---------------------------------------------------------------------------
+# API: Cache invalidation (called after fetch pipeline runs)
+# ---------------------------------------------------------------------------
+@app.route("/api/cache/invalidate", methods=["POST"])
+def api_invalidate_cache():
+    data = request.get_json(silent=True) or {}
+    city_name = data.get("city")
+    invalidate_forecast_cache(city_name)
+    return jsonify({"status": "ok", "cleared": city_name or "all"})
+
+# ---------------------------------------------------------------------------
 # Cache-Control for GET responses
 # ---------------------------------------------------------------------------
 @app.after_request
@@ -327,7 +372,7 @@ def health_check():
 # Run
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    print(f"Dashboard: http://localhost:5000")
-    print(f"API: http://localhost:5000/api/cities")
-    print(f"Serving frontend from: {_DASHBOARD_DIR}")
+    logger.info("Dashboard: http://localhost:5000")
+    logger.info("API: http://localhost:5000/api/cities")
+    logger.info("Serving frontend from: %s", _DASHBOARD_DIR)
     app.run(host="0.0.0.0", port=5000, debug=False)

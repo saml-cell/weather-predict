@@ -19,14 +19,17 @@ Usage:
 
 import argparse
 import json
+import logging
 import os
 import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from urllib.parse import quote
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Weather code descriptions (WMO standard, used by Open-Meteo)
@@ -308,6 +311,53 @@ def fetch_weatherapi(lat, lon):
         })
 
     return validate_weather_data(result)
+
+# ---------------------------------------------------------------------------
+# Source 5: Visual Crossing (optional, needs VISUAL_CROSSING_KEY)
+# ---------------------------------------------------------------------------
+def fetch_visual_crossing(lat, lon):
+    """Fetch from Visual Crossing Weather API free tier."""
+    key = os.environ.get("VISUAL_CROSSING_KEY")
+    if not key:
+        return None
+
+    url = (
+        f"https://weather.visualcrossing.com/VisualCrossingWebServices/rest/services/timeline/"
+        f"{lat},{lon}?unitGroup=metric&key={key}&contentType=json&include=days,current"
+    )
+    raw = fetch_json(url, timeout=15)
+    if not raw or "currentConditions" not in raw:
+        return None
+
+    cc = raw["currentConditions"]
+    result = {
+        "source": "VisualCrossing",
+        "current": {
+            "temp_c": cc.get("temp"),
+            "feels_like_c": cc.get("feelslike"),
+            "humidity": cc.get("humidity"),
+            "wind_speed_kmh": cc.get("windspeed"),
+            "wind_dir_deg": cc.get("winddir"),
+            "precipitation_mm": cc.get("precip") or 0,
+            "pressure_hpa": cc.get("pressure"),
+            "condition": cc.get("conditions", "Unknown"),
+        },
+        "daily": [],
+    }
+
+    for day in raw.get("days", [])[:7]:
+        result["daily"].append({
+            "date": day.get("datetime"),
+            "high_c": day.get("tempmax"),
+            "low_c": day.get("tempmin"),
+            "precip_prob": day.get("precipprob"),
+            "precip_mm": day.get("precip"),
+            "wind_max_kmh": day.get("windspeed"),
+            "condition": day.get("conditions", "Unknown"),
+        })
+
+    return validate_weather_data(result)
+
 
 # ---------------------------------------------------------------------------
 # Data validation
@@ -646,12 +696,13 @@ def main():
 
     # 2. Fetch from all sources in parallel
     results = []
-    with ThreadPoolExecutor(max_workers=4) as pool:
+    with ThreadPoolExecutor(max_workers=5) as pool:
         futures = {
             pool.submit(fetch_open_meteo, lat, lon, location.get("timezone", "auto")): "Open-Meteo",
             pool.submit(fetch_wttr, args.city): "wttr.in",
             pool.submit(fetch_openweather, lat, lon): "OpenWeatherMap",
             pool.submit(fetch_weatherapi, lat, lon): "WeatherAPI",
+            pool.submit(fetch_visual_crossing, lat, lon): "VisualCrossing",
         }
         for future in as_completed(futures):
             name = futures[future]

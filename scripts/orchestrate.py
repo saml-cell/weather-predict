@@ -15,7 +15,16 @@ import os
 import time
 import json
 import argparse
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 PROJECT_ROOT = Path(__file__).parent.parent
 SCRIPTS_DIR = PROJECT_ROOT / "scripts"
@@ -130,14 +139,18 @@ def run_step(step_name: str) -> dict:
     start_time = time.time()
 
     if step.get("per_city"):
-        # Run once per city
+        # Run cities in parallel
         cities = load_cities()
         all_ok = True
-        for city in cities:
-            cmd = [sys.executable, str(script_path), city] + step["extra_args"]
-            sub = run_command(cmd, city)
-            if not sub["success"]:
-                all_ok = False
+        with ThreadPoolExecutor(max_workers=min(len(cities), 4)) as pool:
+            futures = {}
+            for city in cities:
+                cmd = [sys.executable, str(script_path), city] + step["extra_args"]
+                futures[pool.submit(run_command, cmd, city)] = city
+            for future in as_completed(futures):
+                sub = future.result()
+                if not sub["success"]:
+                    all_ok = False
         elapsed = time.time() - start_time
         return {"step": step_name, "success": all_ok, "elapsed": elapsed}
     else:
@@ -153,6 +166,19 @@ def run_step(step_name: str) -> dict:
         }
 
 
+def invalidate_api_cache():
+    """Notify the running API to clear its forecast cache."""
+    try:
+        from urllib.request import urlopen, Request
+        req = Request("http://localhost:5000/api/cache/invalidate",
+                      data=b'{}', headers={"Content-Type": "application/json"},
+                      method="POST")
+        urlopen(req, timeout=5)
+        logger.info("API forecast cache invalidated")
+    except Exception:
+        pass  # API may not be running
+
+
 def run_pipeline(steps: list[str]) -> list[dict]:
     """Run multiple pipeline steps in order."""
     results = []
@@ -162,6 +188,9 @@ def run_pipeline(steps: list[str]) -> list[dict]:
         if not result["success"]:
             print(f"\n  Pipeline stopped at '{step_name}' due to error.")
             break
+        # Invalidate API cache after data-changing steps
+        if step_name in ("fetch", "collect", "verify"):
+            invalidate_api_cache()
     return results
 
 

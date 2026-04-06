@@ -21,7 +21,7 @@ import time
 import urllib.request
 import urllib.error
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db
@@ -129,7 +129,7 @@ def fetch_all_indices(force=False):
         if last_fetch:
             try:
                 last_dt = datetime.fromisoformat(last_fetch)
-                age = datetime.utcnow() - last_dt
+                age = datetime.now(timezone.utc) - last_dt
                 if age < timedelta(days=cache_days):
                     print(f"Indices cached ({age.days}d old, cache={cache_days}d). Use --force to refresh.")
                     return []

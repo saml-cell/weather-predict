@@ -7,9 +7,18 @@ Every other script imports from here.
 """
 
 import json
+import logging
 import os
 import sqlite3
+import threading
 from datetime import datetime
+from datetime import timezone as _tz
+
+logger = logging.getLogger(__name__)
+
+def _now_utc():
+    """Return current UTC time as ISO string."""
+    return datetime.now(_tz.utc).isoformat()
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -33,15 +42,39 @@ def load_config():
     return _config_cache
 
 # ---------------------------------------------------------------------------
-# Database connection
+# Database connection pool (thread-local)
 # ---------------------------------------------------------------------------
+_local = threading.local()
+
 def get_connection():
-    """Return a SQLite connection with row_factory and WAL mode."""
+    """Return a SQLite connection with row_factory and WAL mode.
+
+    Uses thread-local storage to reuse connections within the same thread,
+    avoiding the overhead of opening/closing per call.
+    """
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        try:
+            conn.execute("SELECT 1")
+            return conn
+        except sqlite3.ProgrammingError:
+            _local.conn = None
+
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
+    _local.conn = conn
+    logger.debug("Opened new DB connection (thread %s)", threading.current_thread().name)
     return conn
+
+
+def close_connection():
+    """Explicitly close the thread-local connection."""
+    conn = getattr(_local, "conn", None)
+    if conn is not None:
+        conn.close()
+        _local.conn = None
 
 # ---------------------------------------------------------------------------
 # Condition normalization
@@ -131,21 +164,18 @@ def get_city(city_name):
     row = conn.execute(
         "SELECT * FROM cities WHERE LOWER(name) = LOWER(?)", (city_name,)
     ).fetchone()
-    conn.close()
     return dict(row) if row else None
 
 def get_city_by_id(city_id):
     """Lookup city by ID. Returns dict or None."""
     conn = get_connection()
     row = conn.execute("SELECT * FROM cities WHERE id = ?", (city_id,)).fetchone()
-    conn.close()
     return dict(row) if row else None
 
 def get_all_cities():
     """Return all tracked cities as list of dicts."""
     conn = get_connection()
     rows = conn.execute("SELECT * FROM cities ORDER BY name").fetchall()
-    conn.close()
     return [dict(r) for r in rows]
 
 def insert_city(name, country, lat, lon, timezone="auto"):
@@ -156,15 +186,13 @@ def insert_city(name, country, lat, lon, timezone="auto"):
         (lat, lon)
     ).fetchone()
     if existing:
-        conn.close()
         return existing["id"]
     conn.execute(
         "INSERT INTO cities (name, country, lat, lon, timezone, added_at) VALUES (?, ?, ?, ?, ?, ?)",
-        (name, country, lat, lon, timezone, datetime.utcnow().isoformat())
+        (name, country, lat, lon, timezone, _now_utc())
     )
     conn.commit()
     city_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    conn.close()
     return city_id
 
 # ---------------------------------------------------------------------------
@@ -186,7 +214,7 @@ def insert_forecast(city_id, source_name, fetched_at, forecast_date,
           temp_high_c, temp_low_c, precip_prob, precip_mm,
           wind_max_kmh, condition_text, pressure_hpa, humidity_pct, raw_json))
     conn.commit()
-    conn.close()
+
 
 def insert_forecasts_batch(rows):
     """Insert multiple forecast rows in one transaction. Each row is a tuple."""
@@ -199,7 +227,7 @@ def insert_forecasts_batch(rows):
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, rows)
     conn.commit()
-    conn.close()
+
 
 def get_forecasts_for_date(city_id, forecast_date):
     """All source predictions for a specific city+date. Returns list of dicts."""
@@ -209,7 +237,7 @@ def get_forecasts_for_date(city_id, forecast_date):
         WHERE city_id = ? AND forecast_date = ?
         ORDER BY source_name
     """, (city_id, forecast_date)).fetchall()
-    conn.close()
+
     return [dict(r) for r in rows]
 
 def get_forecasts_in_window(city_id, source_name, start_date, end_date):
@@ -221,7 +249,7 @@ def get_forecasts_in_window(city_id, source_name, start_date, end_date):
           AND forecast_date >= ? AND forecast_date <= ?
         ORDER BY forecast_date
     """, (city_id, source_name, start_date, end_date)).fetchall()
-    conn.close()
+
     return [dict(r) for r in rows]
 
 # ---------------------------------------------------------------------------
@@ -240,9 +268,9 @@ def insert_observation(city_id, obs_date, temp_high_c=None, temp_low_c=None,
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (city_id, obs_date, temp_high_c, temp_low_c, precip_mm,
           wind_max_kmh, condition_text, pressure_hpa, humidity_pct,
-          source, datetime.utcnow().isoformat()))
+          source, _now_utc()))
     conn.commit()
-    conn.close()
+
 
 def get_observation(city_id, obs_date):
     """Get observation for a specific city+date. Returns dict or None."""
@@ -251,7 +279,7 @@ def get_observation(city_id, obs_date):
         "SELECT * FROM observations WHERE city_id = ? AND obs_date = ?",
         (city_id, obs_date)
     ).fetchone()
-    conn.close()
+
     return dict(row) if row else None
 
 def get_observations_in_window(city_id, start_date, end_date):
@@ -262,7 +290,7 @@ def get_observations_in_window(city_id, start_date, end_date):
         WHERE city_id = ? AND obs_date >= ? AND obs_date <= ?
         ORDER BY obs_date
     """, (city_id, start_date, end_date)).fetchall()
-    conn.close()
+
     return [dict(r) for r in rows]
 
 # ---------------------------------------------------------------------------
@@ -278,7 +306,7 @@ def get_weights(city_id):
     rows = conn.execute(
         "SELECT * FROM source_accuracy WHERE city_id = ?", (city_id,)
     ).fetchall()
-    conn.close()
+
 
     weights = {}
     for row in rows:
@@ -305,10 +333,10 @@ def upsert_accuracy(city_id, source_name, metric, mae=None, accuracy_pct=None,
          sample_count, window_days, computed_at, bias, lead_time_group)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (city_id, source_name, metric, mae, accuracy_pct, weight,
-          sample_count, window_days, datetime.utcnow().isoformat(),
+          sample_count, window_days, _now_utc(),
           bias, lead_time_group))
     conn.commit()
-    conn.close()
+
 
 # ---------------------------------------------------------------------------
 # Climate index operations (seasonal forecasting)
@@ -320,23 +348,23 @@ def insert_climate_index(index_name, year, month, value):
         INSERT OR REPLACE INTO climate_indices
         (index_name, year, month, value, fetched_at)
         VALUES (?, ?, ?, ?, ?)
-    """, (index_name, year, month, value, datetime.utcnow().isoformat()))
+    """, (index_name, year, month, value, _now_utc()))
     conn.commit()
-    conn.close()
+
 
 def insert_climate_indices_batch(rows):
     """Bulk insert climate index values.
     Each row: (index_name, year, month, value).
     """
     conn = get_connection()
-    now = datetime.utcnow().isoformat()
+    now = _now_utc()
     conn.executemany("""
         INSERT OR REPLACE INTO climate_indices
         (index_name, year, month, value, fetched_at)
         VALUES (?, ?, ?, ?, ?)
     """, [(r[0], r[1], r[2], r[3], now) for r in rows])
     conn.commit()
-    conn.close()
+
 
 def get_climate_index(index_name, year, month):
     """Get a single index value. Returns float or None."""
@@ -345,7 +373,7 @@ def get_climate_index(index_name, year, month):
         "SELECT value FROM climate_indices WHERE index_name = ? AND year = ? AND month = ?",
         (index_name, year, month)
     ).fetchone()
-    conn.close()
+
     return row["value"] if row else None
 
 def get_climate_index_series(index_name, start_year=None, end_year=None):
@@ -361,7 +389,7 @@ def get_climate_index_series(index_name, start_year=None, end_year=None):
         params.append(end_year)
     query += " ORDER BY year, month"
     rows = conn.execute(query, params).fetchall()
-    conn.close()
+
     return {(r["year"], r["month"]): r["value"] for r in rows}
 
 def get_latest_climate_indices():
@@ -379,7 +407,7 @@ def get_latest_climate_indices():
         ) latest ON ci.index_name = latest.index_name
             AND (ci.year * 100 + ci.month) = latest.ym
     """).fetchall()
-    conn.close()
+
     return {r["index_name"]: {
         "value": r["value"], "year": r["year"],
         "month": r["month"], "fetched_at": r["fetched_at"]
@@ -391,7 +419,7 @@ def get_indices_fetch_time():
     row = conn.execute(
         "SELECT MAX(fetched_at) as latest FROM climate_indices"
     ).fetchone()
-    conn.close()
+
     return row["latest"] if row and row["latest"] else None
 
 # ---------------------------------------------------------------------------
@@ -414,9 +442,9 @@ def insert_climatology(city_id, month, stats):
           stats.get("precip_mean"), stats.get("precip_std"),
           stats.get("wind_mean"), stats.get("wind_std"),
           stats.get("sample_years"),
-          datetime.utcnow().isoformat()))
+          _now_utc()))
     conn.commit()
-    conn.close()
+
 
 def get_climatology(city_id):
     """Load climatology for all 12 months. Returns {month: dict} or {}."""
@@ -425,7 +453,7 @@ def get_climatology(city_id):
         "SELECT * FROM climatology WHERE city_id = ? ORDER BY month",
         (city_id,)
     ).fetchall()
-    conn.close()
+
     return {r["month"]: dict(r) for r in rows}
 
 def has_climatology(city_id):
@@ -435,7 +463,7 @@ def has_climatology(city_id):
         "SELECT COUNT(*) as cnt FROM climatology WHERE city_id = ?",
         (city_id,)
     ).fetchone()
-    conn.close()
+
     return row["cnt"] >= 12
 
 # ---------------------------------------------------------------------------
@@ -460,9 +488,9 @@ def insert_seasonal_forecast(city_id, target_year, target_month, method, forecas
           forecast.get("tercile_prob_bn"), forecast.get("tercile_prob_nn"),
           forecast.get("tercile_prob_an"),
           forecast.get("details_json"),
-          datetime.utcnow().isoformat()))
+          _now_utc()))
     conn.commit()
-    conn.close()
+
 
 def get_seasonal_forecasts(city_id, target_year, target_month):
     """Get all method forecasts for a city/year/month. Returns list of dicts."""
@@ -472,7 +500,7 @@ def get_seasonal_forecasts(city_id, target_year, target_month):
         WHERE city_id = ? AND target_year = ? AND target_month = ?
         ORDER BY method
     """, (city_id, target_year, target_month)).fetchall()
-    conn.close()
+
     return [dict(r) for r in rows]
 
 # ---------------------------------------------------------------------------
@@ -486,6 +514,6 @@ def upsert_seasonal_skill(city_id, method, metric, value, sample_count=0):
         (city_id, method, metric, value, sample_count, computed_at)
         VALUES (?, ?, ?, ?, ?, ?)
     """, (city_id, method, metric, value, sample_count,
-          datetime.utcnow().isoformat()))
+          _now_utc()))
     conn.commit()
-    conn.close()
+
