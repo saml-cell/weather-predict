@@ -704,6 +704,189 @@ def send_telegram(text, parse_mode="Markdown"):
 
 
 # ---------------------------------------------------------------------------
+# Interactive bot (polling mode)
+# ---------------------------------------------------------------------------
+BOT_COMMANDS = {
+    "/forecast": "Predpoveď pre mesto — /forecast Bratislava",
+    "/all": "Prehľad všetkých miest",
+    "/alerts": "Výstrahy počasia",
+    "/seasonal": "Sezónna predpoveď — /seasonal Bratislava",
+    "/indices": "Klimatické indexy",
+    "/help": "Zobraz príkazy",
+}
+
+
+def handle_command(text):
+    """Parse a command and return the response text."""
+    text = text.strip()
+    parts = text.split(None, 1)
+    cmd = parts[0].lower() if parts else ""
+    arg = parts[1].strip() if len(parts) > 1 else ""
+
+    # Strip @botname suffix from commands
+    if "@" in cmd:
+        cmd = cmd.split("@")[0]
+
+    if cmd == "/help" or cmd == "/start":
+        lines = ["🌤️ *Príkazy:*", ""]
+        for c, desc in BOT_COMMANDS.items():
+            lines.append(f"  `{c}` — {desc}")
+        return "\n".join(lines)
+
+    elif cmd == "/forecast":
+        cities = get_cities()
+        if not arg:
+            # No city specified — show Bratislava or list cities
+            ba = next((c for c in cities if "bratislava" in c["name"].lower()), None)
+            if ba:
+                fc = get_forecast(ba["id"])
+                return format_city_forecast(fc) or "❌ Predpoveď nie je dostupná"
+            else:
+                names = ", ".join(c["name"] for c in cities)
+                return f"Napíš mesto: /forecast <mesto>\nSledované: {names}"
+        match = next((c for c in cities if arg.lower() in c["name"].lower()), None)
+        if not match:
+            names = ", ".join(c["name"] for c in cities)
+            return f"❌ '{arg}' nie je sledované.\nDostupné: {names}"
+        fc = get_forecast(match["id"])
+        return format_city_forecast(fc) or f"❌ Predpoveď pre {arg} nie je dostupná"
+
+    elif cmd == "/all":
+        cities = get_cities()
+        parts_out = []
+        for city in cities:
+            fc = get_forecast(city["id"])
+            compact = format_compact(fc)
+            if compact:
+                parts_out.append(compact)
+        return "🌍 *Počasie — všetky mestá*\n━━━━━━━━━━━━━━━━━━━━\n\n" + "\n".join(parts_out)
+
+    elif cmd == "/alerts":
+        alerts_data = get_alerts()
+        return format_alerts(alerts_data)
+
+    elif cmd == "/seasonal":
+        cities = get_cities()
+        if not arg:
+            ba = next((c for c in cities if "bratislava" in c["name"].lower()), None)
+            if ba:
+                data = get_seasonal(ba["id"], 3)
+                return format_seasonal(data, ba["name"])
+            return "Napíš mesto: /seasonal <mesto>"
+        match = next((c for c in cities if arg.lower() in c["name"].lower()), None)
+        if not match:
+            names = ", ".join(c["name"] for c in cities)
+            return f"❌ '{arg}' nie je sledované.\nDostupné: {names}"
+        data = get_seasonal(match["id"], 3)
+        return format_seasonal(data, match["name"])
+
+    elif cmd == "/indices":
+        data = get_indices()
+        return format_indices(data)
+
+    else:
+        # Unknown command — try as city name for forecast
+        cities = get_cities()
+        match = next((c for c in cities if text.lower() in c["name"].lower()), None)
+        if match:
+            fc = get_forecast(match["id"])
+            return format_city_forecast(fc) or "❌ Predpoveď nie je dostupná"
+        return None  # Ignore non-command messages
+
+
+def run_listener():
+    """Poll Telegram for incoming messages and respond to commands."""
+    import time
+
+    token, allowed_chat = load_telegram_config()
+    if not token:
+        print("ERROR: No Telegram bot token configured")
+        sys.exit(1)
+
+    print(f"Bot listener started (chat: {allowed_chat})")
+
+    # Register commands with BotFather (best-effort)
+    try:
+        cmds = [{"command": c.lstrip("/"), "description": d} for c, d in BOT_COMMANDS.items()]
+        payload = json.dumps({"commands": cmds}).encode()
+        req = Request(
+            f"https://api.telegram.org/bot{token}/setMyCommands",
+            data=payload, headers={"Content-Type": "application/json"}
+        )
+        urlopen(req, timeout=5)
+    except Exception:
+        pass
+
+    last_update_id = 0
+    base_url = f"https://api.telegram.org/bot{token}"
+    poll_interval = 2  # seconds between polls
+
+    while True:
+        try:
+            url = f"{base_url}/getUpdates?offset={last_update_id + 1}&timeout=30"
+            req = Request(url, headers={"User-Agent": "WeatherBot/1.0"})
+            with urlopen(req, timeout=35) as resp:
+                data = json.loads(resp.read().decode())
+
+            if not data.get("ok"):
+                time.sleep(poll_interval)
+                continue
+
+            for update in data.get("result", []):
+                last_update_id = update["update_id"]
+                msg = update.get("message", {})
+                chat_id = str(msg.get("chat", {}).get("id", ""))
+                text = msg.get("text", "")
+
+                if not text:
+                    continue
+
+                # Security: only respond to allowed chat
+                if allowed_chat and chat_id != str(allowed_chat):
+                    continue
+
+                response = handle_command(text)
+                if response:
+                    send_payload = json.dumps({
+                        "chat_id": chat_id,
+                        "text": response,
+                        "parse_mode": "Markdown",
+                    }).encode()
+                    try:
+                        req = Request(
+                            f"{base_url}/sendMessage",
+                            data=send_payload,
+                            headers={"Content-Type": "application/json"}
+                        )
+                        urlopen(req, timeout=10)
+                    except Exception:
+                        # Retry without markdown
+                        send_payload = json.dumps({
+                            "chat_id": chat_id,
+                            "text": response,
+                        }).encode()
+                        try:
+                            req = Request(
+                                f"{base_url}/sendMessage",
+                                data=send_payload,
+                                headers={"Content-Type": "application/json"}
+                            )
+                            urlopen(req, timeout=10)
+                        except Exception as e:
+                            print(f"Send failed: {e}")
+
+        except (URLError, TimeoutError, OSError) as e:
+            print(f"Poll error: {e}")
+            time.sleep(5)
+        except KeyboardInterrupt:
+            print("\nBot listener stopped")
+            break
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            time.sleep(5)
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 def main():
@@ -720,7 +903,13 @@ def main():
                         help="Show current climate index state")
     parser.add_argument("--send", action="store_true",
                         help="Send to Telegram (via OpenClaw bot)")
+    parser.add_argument("--listen", action="store_true",
+                        help="Run as interactive bot (polls for commands)")
     args = parser.parse_args()
+
+    if args.listen:
+        run_listener()
+        return
 
     # Check API is running
     health = api_get("/api/health")

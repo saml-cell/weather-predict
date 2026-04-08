@@ -2,7 +2,13 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <meta name="apple-mobile-web-app-title" content="Weather" />
+  <meta name="theme-color" content="#0f172a" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <link rel="apple-touch-icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌤️</text></svg>" />
   <title>Weather Predict Dashboard</title>
 
   <!-- Tailwind CSS -->
@@ -34,15 +40,36 @@
   <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
 
   <style>
-    body { margin: 0; font-family: 'Inter', system-ui, -apple-system, sans-serif; }
+    body {
+      margin: 0;
+      font-family: 'Inter', system-ui, -apple-system, sans-serif;
+      padding-top: env(safe-area-inset-top);
+      padding-bottom: env(safe-area-inset-bottom);
+      padding-left: env(safe-area-inset-left);
+      padding-right: env(safe-area-inset-right);
+      -webkit-text-size-adjust: 100%;
+    }
     .leaflet-container { height: 100%; width: 100%; }
     .leaflet-tile-pane { will-change: transform; }
     .fade-in { animation: fadeIn 0.3s ease-in; }
     @keyframes fadeIn { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
     .chart-container { position: relative; height: 250px; }
+    @media (max-width: 640px) {
+      .chart-container { height: 200px; }
+    }
     ::-webkit-scrollbar { width: 6px; }
     ::-webkit-scrollbar-track { background: #1e293b; }
     ::-webkit-scrollbar-thumb { background: #475569; border-radius: 3px; }
+    /* Mobile nav menu */
+    .mobile-menu { display: none; }
+    .mobile-menu.open { display: flex; }
+    /* Touch-friendly tap targets */
+    @media (max-width: 640px) {
+      button, a { min-height: 44px; }
+      .metric-card-grid { grid-template-columns: repeat(2, 1fr) !important; }
+    }
+    /* Safe area for bottom elements */
+    .safe-bottom { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
   </style>
 </head>
 <body class="bg-slate-900 text-white min-h-screen">
@@ -67,6 +94,7 @@
       getCompare: (cityId) => fetch(`/api/compare/${cityId}`).then(r => r.json()),
       getSeasonal: (cityId, months=3) => fetch(`/api/seasonal/${cityId}?months=${months}`).then(r => r.json()),
       getIndices: () => fetch('/api/indices').then(r => r.json()),
+      getHealth: () => fetch('/api/health').then(r => r.json()),
     };
 
     // =====================================================================
@@ -200,9 +228,9 @@
         e.stopPropagation();
         if (open) { setOpen(false); return; }
         const rect = e.currentTarget.getBoundingClientRect();
-        const popupW = 320;
+        const popupW = Math.min(320, window.innerWidth - 32);
         let left = rect.left + rect.width / 2 - popupW / 2;
-        left = Math.max(8, Math.min(left, window.innerWidth - popupW - 8));
+        left = Math.max(16, Math.min(left, window.innerWidth - popupW - 16));
         const spaceAbove = rect.top;
         const top = spaceAbove > 200 ? rect.top - 8 : rect.bottom + 8;
         setPos({ top, left, above: spaceAbove > 200 });
@@ -221,7 +249,7 @@
           </span>
           {open && ReactDOM.createPortal(
             <div ref={popupRef}
-              className="fixed z-[9999] w-80 p-3 rounded-lg bg-slate-900 border border-amber-500/40 shadow-xl shadow-black/50 text-xs text-slate-200 leading-relaxed"
+              className="fixed z-[9999] w-[min(320px,calc(100vw-32px))] p-3 rounded-lg bg-slate-900 border border-amber-500/40 shadow-xl shadow-black/50 text-xs text-slate-200 leading-relaxed"
               style={{
                 top: pos.above ? undefined : pos.top,
                 bottom: pos.above ? `${window.innerHeight - pos.top}px` : undefined,
@@ -240,57 +268,147 @@
       );
     }
 
+    function LastUpdated({ lastFetch, onRefresh }) {
+      const [ago, setAgo] = useState('');
+      useEffect(() => {
+        if (!lastFetch) return;
+        const update = () => {
+          const diff = Math.floor((Date.now() - new Date(lastFetch).getTime()) / 1000);
+          if (diff < 60) setAgo('just now');
+          else if (diff < 3600) setAgo(`${Math.floor(diff / 60)}m ago`);
+          else if (diff < 86400) setAgo(`${Math.floor(diff / 3600)}h ago`);
+          else setAgo(`${Math.floor(diff / 86400)}d ago`);
+        };
+        update();
+        const id = setInterval(update, 30000);
+        return () => clearInterval(id);
+      }, [lastFetch]);
+      if (!lastFetch) return null;
+      return (
+        <button onClick={onRefresh} title="Click to refresh"
+          className="text-xs text-slate-500 hover:text-slate-300 transition flex items-center gap-1.5 whitespace-nowrap">
+          <svg className="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+          </svg>
+          {ago}
+        </button>
+      );
+    }
+
     function App() {
       const [page, setPage] = useState('map');
       const [selectedCity, setSelectedCity] = useState(null);
       const [cities, setCities] = useState([]);
       const [learnMode, setLearnMode] = useState(false);
+      const [menuOpen, setMenuOpen] = useState(false);
+      const [lastFetch, setLastFetch] = useState(null);
+      const refreshKey = useRef(0);
 
-      useEffect(() => { api.getCities().then(setCities).catch(console.error); }, []);
+      const loadData = useCallback(() => {
+        api.getCities().then(setCities).catch(console.error);
+        api.getHealth().then(h => { if (h.last_fetch) setLastFetch(h.last_fetch); }).catch(() => {});
+        refreshKey.current += 1;
+      }, []);
 
-      const openCity = (city) => { setSelectedCity(city); setPage('detail'); };
-      const openTrends = (city) => { setSelectedCity(city); setPage('trends'); };
-      const openSeasonal = (city) => { setSelectedCity(city); setPage('seasonal'); };
+      useEffect(() => { loadData(); }, [loadData]);
+
+      // Auto-refresh every 5 minutes
+      useEffect(() => {
+        const id = setInterval(loadData, 5 * 60 * 1000);
+        return () => clearInterval(id);
+      }, [loadData]);
+
+      const openCity = (city) => { setSelectedCity(city); setPage('detail'); setMenuOpen(false); };
+      const openTrends = (city) => { setSelectedCity(city); setPage('trends'); setMenuOpen(false); };
+      const openSeasonal = (city) => { setSelectedCity(city); setPage('seasonal'); setMenuOpen(false); };
+      const navTo = (p) => { setPage(p); setMenuOpen(false); };
 
       return (
         <div className="min-h-screen">
           {/* Nav */}
-          <nav className="bg-slate-800/80 backdrop-blur-sm border-b border-slate-700 px-6 py-3 flex items-center justify-between sticky top-0 z-50">
-            <div className="flex items-center gap-3 cursor-pointer" onClick={() => setPage('map')}>
-              <span className="text-2xl">{'\uD83C\uDF24\uFE0F'}</span>
-              <h1 className="text-lg font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
-                Weather Predict
-              </h1>
-            </div>
-            <div className="flex gap-2">
-              <button onClick={() => setPage('map')}
-                className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${page === 'map' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
-                {'\uD83D\uDDFA\uFE0F'} Map
-              </button>
-              {selectedCity && (
-                <>
-                  <button onClick={() => setPage('detail')}
-                    className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${page === 'detail' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
-                    {'\uD83D\uDCCA'} {selectedCity.name}
-                  </button>
-                  <button onClick={() => setPage('trends')}
-                    className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${page === 'trends' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
-                    {'\uD83D\uDCC8'} Trends
-                  </button>
-                  <button onClick={() => openSeasonal(selectedCity)}
-                    className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${page === 'seasonal' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
-                    {'\uD83C\uDF0D'} Seasonal
-                  </button>
-                </>
-              )}
-              {/* Learn Mode toggle — always visible */}
-              <div className="ml-3 pl-3 border-l border-slate-600">
-                <button onClick={() => setLearnMode(!learnMode)}
-                  className={`px-3 py-1.5 rounded-lg text-sm font-medium transition flex items-center gap-1.5 ${learnMode ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
-                  {learnMode ? '\uD83D\uDCA1' : '\u2753'} {learnMode ? 'Learn ON' : 'Learn'}
-                </button>
+          <nav className="bg-slate-800/80 backdrop-blur-sm border-b border-slate-700 px-4 sm:px-6 py-3 sticky top-0 z-50">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3 cursor-pointer" onClick={() => navTo('map')}>
+                <span className="text-2xl">{'\uD83C\uDF24\uFE0F'}</span>
+                <h1 className="text-lg font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
+                  Weather Predict
+                </h1>
               </div>
+              {/* Desktop nav */}
+              <div className="hidden sm:flex gap-2 items-center">
+                <button onClick={() => navTo('map')}
+                  className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${page === 'map' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                  {'\uD83D\uDDFA\uFE0F'} Map
+                </button>
+                {selectedCity && (
+                  <>
+                    <button onClick={() => navTo('detail')}
+                      className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${page === 'detail' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                      {'\uD83D\uDCCA'} {selectedCity.name}
+                    </button>
+                    <button onClick={() => navTo('trends')}
+                      className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${page === 'trends' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                      {'\uD83D\uDCC8'} Trends
+                    </button>
+                    <button onClick={() => openSeasonal(selectedCity)}
+                      className={`px-4 py-1.5 rounded-lg text-sm font-medium transition ${page === 'seasonal' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                      {'\uD83C\uDF0D'} Seasonal
+                    </button>
+                  </>
+                )}
+                <div className="ml-3 pl-3 border-l border-slate-600 flex items-center gap-3">
+                  <button onClick={() => setLearnMode(!learnMode)}
+                    className={`px-3 py-1.5 rounded-lg text-sm font-medium transition flex items-center gap-1.5 ${learnMode ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                    {learnMode ? '\uD83D\uDCA1' : '\u2753'} {learnMode ? 'Learn ON' : 'Learn'}
+                  </button>
+                  <LastUpdated lastFetch={lastFetch} onRefresh={loadData} />
+                </div>
+              </div>
+              {/* Mobile hamburger */}
+              <button onClick={() => setMenuOpen(!menuOpen)}
+                className="sm:hidden p-2 rounded-lg text-slate-400 hover:text-white hover:bg-slate-700 transition"
+                aria-label="Menu">
+                <svg className="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  {menuOpen
+                    ? <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+                    : <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 6h16M4 12h16M4 18h16" />
+                  }
+                </svg>
+              </button>
             </div>
+            {/* Mobile dropdown menu */}
+            {menuOpen && (
+              <div className="sm:hidden mt-3 pt-3 border-t border-slate-700 flex flex-col gap-2">
+                <button onClick={() => navTo('map')}
+                  className={`w-full text-left px-4 py-3 rounded-lg text-sm font-medium transition ${page === 'map' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                  {'\uD83D\uDDFA\uFE0F'} Map
+                </button>
+                {selectedCity && (
+                  <>
+                    <button onClick={() => navTo('detail')}
+                      className={`w-full text-left px-4 py-3 rounded-lg text-sm font-medium transition ${page === 'detail' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                      {'\uD83D\uDCCA'} {selectedCity.name}
+                    </button>
+                    <button onClick={() => navTo('trends')}
+                      className={`w-full text-left px-4 py-3 rounded-lg text-sm font-medium transition ${page === 'trends' ? 'bg-blue-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                      {'\uD83D\uDCC8'} Trends
+                    </button>
+                    <button onClick={() => { openSeasonal(selectedCity); }}
+                      className={`w-full text-left px-4 py-3 rounded-lg text-sm font-medium transition ${page === 'seasonal' ? 'bg-purple-600 text-white' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                      {'\uD83C\uDF0D'} Seasonal
+                    </button>
+                  </>
+                )}
+                <button onClick={() => { setLearnMode(!learnMode); setMenuOpen(false); }}
+                  className={`w-full text-left px-4 py-3 rounded-lg text-sm font-medium transition ${learnMode ? 'bg-amber-500 text-slate-900' : 'text-slate-400 hover:text-white hover:bg-slate-700'}`}>
+                  {learnMode ? '\uD83D\uDCA1 Learn Mode ON' : '\u2753 Learn Mode'}
+                </button>
+                <div className="px-4 py-2">
+                  <LastUpdated lastFetch={lastFetch} onRefresh={loadData} />
+                </div>
+              </div>
+            )}
           </nav>
 
           {/* Learn Mode banner */}
@@ -455,72 +573,74 @@
       };
 
       return (
-        <div className="relative" style={{ height: 'calc(100vh - 52px)' }}>
+        <div className="relative" style={{ height: 'calc(100dvh - 52px)' }}>
           <div ref={mapRef} className="absolute inset-0" />
 
-          {/* Search overlay */}
-          <div className="absolute top-4 left-4 z-[1000]">
-            <form onSubmit={handleAddCity} className="flex gap-2">
-              <input value={newCity} onChange={e => setNewCity(e.target.value)}
-                placeholder="Add city... (e.g. Paris)"
-                className="bg-slate-800/90 backdrop-blur-sm border border-slate-600 rounded-lg px-4 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:border-blue-500 w-64" />
-              <button type="submit" disabled={adding}
-                className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 px-4 py-2 rounded-lg text-sm font-medium transition">
-                {adding ? '...' : '+ Add'}
-              </button>
-              <button type="button" onClick={handleGeolocate} disabled={geoLoading}
-                className="bg-slate-700/90 hover:bg-slate-600 disabled:bg-slate-600 backdrop-blur-sm border border-slate-600 px-3 py-2 rounded-lg text-sm font-medium transition flex items-center gap-1.5"
-                title="Use my location">
-                {geoLoading ? (
-                  <span className="animate-spin inline-block w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full" />
-                ) : (
-                  <>{'\uD83D\uDCCD'} My Location</>
-                )}
-              </button>
+          {/* Search overlay — stacks vertically on mobile */}
+          <div className="absolute top-3 left-3 right-3 sm:right-auto z-[1000]">
+            <form onSubmit={handleAddCity} className="flex flex-col sm:flex-row gap-2">
+              <div className="flex gap-2">
+                <input value={newCity} onChange={e => setNewCity(e.target.value)}
+                  placeholder="Add city..."
+                  className="bg-slate-800/90 backdrop-blur-sm border border-slate-600 rounded-lg px-4 py-2.5 text-sm text-white placeholder-slate-400 focus:outline-none focus:border-blue-500 flex-1 sm:w-56" />
+                <button type="submit" disabled={adding}
+                  className="bg-blue-600 hover:bg-blue-700 disabled:bg-slate-600 px-4 py-2.5 rounded-lg text-sm font-medium transition whitespace-nowrap">
+                  {adding ? '...' : '+ Add'}
+                </button>
+              </div>
+              <div className="flex gap-2">
+                <button type="button" onClick={handleGeolocate} disabled={geoLoading}
+                  className="bg-slate-700/90 hover:bg-slate-600 disabled:bg-slate-600 backdrop-blur-sm border border-slate-600 px-3 py-2.5 rounded-lg text-sm font-medium transition flex items-center gap-1.5"
+                  title="Use my location">
+                  {geoLoading ? (
+                    <span className="animate-spin inline-block w-4 h-4 border-2 border-blue-400 border-t-transparent rounded-full" />
+                  ) : (
+                    <>{'\uD83D\uDCCD'}<span className="hidden sm:inline"> My Location</span></>
+                  )}
+                </button>
+                {/* Radar toggle — inline on mobile */}
+                <button type="button" onClick={() => setRadarOn(!radarOn)}
+                  className={`backdrop-blur-sm border px-3 py-2.5 rounded-lg text-sm font-medium transition flex items-center gap-1.5 ${
+                    radarOn
+                      ? 'bg-cyan-600/90 border-cyan-500 text-white'
+                      : 'bg-slate-800/90 border-slate-600 text-slate-300 hover:bg-slate-700'
+                  }`}>
+                  {'\uD83C\uDF27\uFE0F'}<span className="hidden sm:inline"> Radar {radarOn ? 'ON' : 'OFF'}</span>
+                </button>
+              </div>
             </form>
           </div>
 
-          {/* Radar toggle */}
-          <div className="absolute top-4 right-4 z-[1000]">
-            <button onClick={() => setRadarOn(!radarOn)}
-              className={`backdrop-blur-sm border px-4 py-2 rounded-lg text-sm font-medium transition flex items-center gap-2 ${
-                radarOn
-                  ? 'bg-cyan-600/90 border-cyan-500 text-white'
-                  : 'bg-slate-800/90 border-slate-600 text-slate-300 hover:bg-slate-700'
-              }`}>
-              {'\uD83C\uDF27\uFE0F'} Radar {radarOn ? 'ON' : 'OFF'}
-            </button>
-          </div>
-
-          {/* City cards at bottom */}
-          <div className="absolute bottom-4 left-4 right-4 z-[1000] flex gap-3 overflow-x-auto pb-2">
-            {cities.map(city => {
-              const p = previews[city.id];
-              return (
-                <div key={city.id} onClick={() => onSelect(city)}
-                  className="bg-slate-800/90 backdrop-blur-sm border border-slate-700 rounded-xl p-4 min-w-[200px] cursor-pointer hover:border-blue-500/50 transition flex-shrink-0">
-                  <div className="flex items-center justify-between mb-1">
-                    <span className="font-semibold text-sm">{city.name}</span>
-                    {p && <span className={`text-xs px-2 py-0.5 rounded-full border ${confidenceBg[p.current.confidence]}`}>
-                      {p.current.confidence}
-                    </span>}
-                  </div>
-                  <div className="text-slate-400 text-xs mb-2">{city.country}</div>
-                  {p ? (
-                    <div className="flex items-center gap-3">
-                      <span className="text-2xl font-bold">{p.current.temp_c}&deg;</span>
-                      <div className="text-xs text-slate-400">
-                        <div>Feels {p.current.feels_like_c}&deg;</div>
-                        <div>{p.current.humidity_pct}% humidity</div>
-                        <div>{p.current.pressure_hpa} hPa</div>
-                      </div>
+          {/* City cards at bottom — safe area for iPhone */}
+          <div className="absolute bottom-0 left-0 right-0 z-[1000] safe-bottom px-3 pt-2">
+            <div className="flex gap-2 sm:gap-3 overflow-x-auto pb-2 snap-x snap-mandatory">
+              {cities.map(city => {
+                const p = previews[city.id];
+                return (
+                  <div key={city.id} onClick={() => onSelect(city)}
+                    className="bg-slate-800/90 backdrop-blur-sm border border-slate-700 rounded-xl p-3 sm:p-4 min-w-[160px] sm:min-w-[200px] cursor-pointer hover:border-blue-500/50 active:border-blue-500 transition flex-shrink-0 snap-start">
+                    <div className="flex items-center justify-between mb-1">
+                      <span className="font-semibold text-sm">{city.name}</span>
+                      {p && <span className={`text-[10px] sm:text-xs px-1.5 sm:px-2 py-0.5 rounded-full border ${confidenceBg[p.current.confidence]}`}>
+                        {p.current.confidence}
+                      </span>}
                     </div>
-                  ) : (
-                    <div className="text-slate-500 text-sm">Loading...</div>
-                  )}
-                </div>
-              );
-            })}
+                    <div className="text-slate-400 text-xs mb-1.5">{city.country}</div>
+                    {p ? (
+                      <div className="flex items-center gap-2 sm:gap-3">
+                        <span className="text-xl sm:text-2xl font-bold">{p.current.temp_c}&deg;</span>
+                        <div className="text-[11px] sm:text-xs text-slate-400">
+                          <div>Feels {p.current.feels_like_c}&deg;</div>
+                          <div>{p.current.humidity_pct}%</div>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="text-slate-500 text-sm">Loading...</div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
           </div>
         </div>
       );
@@ -576,25 +696,25 @@
       const cur = forecast.current;
 
       return (
-        <div className="max-w-7xl mx-auto p-6 space-y-6 fade-in">
+        <div className="max-w-7xl mx-auto p-4 sm:p-6 space-y-4 sm:space-y-6 fade-in">
           {/* Header */}
-          <div className="flex items-center justify-between">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
-              <h2 className="text-3xl font-bold">{forecast.location.name}</h2>
-              <p className="text-slate-400">{forecast.location.country} &middot; {forecast.sources_used.length} sources &middot; {forecast.sources_used.join(', ')}</p>
+              <h2 className="text-2xl sm:text-3xl font-bold">{forecast.location.name}</h2>
+              <p className="text-slate-400 text-sm">{forecast.location.country} &middot; {forecast.sources_used.length} sources</p>
             </div>
             <div className="flex gap-2">
-              <button onClick={onTrends} className="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm transition">
-                {'\uD83D\uDCC8'} View Trends
+              <button onClick={onTrends} className="bg-slate-700 hover:bg-slate-600 active:bg-slate-500 px-4 py-2.5 rounded-lg text-sm transition flex-1 sm:flex-none">
+                {'\uD83D\uDCC8'} Trends
               </button>
-              <button onClick={onSeasonal} className="bg-purple-700 hover:bg-purple-600 px-4 py-2 rounded-lg text-sm transition">
-                {'\uD83C\uDF0D'} Seasonal Outlook
+              <button onClick={onSeasonal} className="bg-purple-700 hover:bg-purple-600 active:bg-purple-500 px-4 py-2.5 rounded-lg text-sm transition flex-1 sm:flex-none">
+                {'\uD83C\uDF0D'} Seasonal
               </button>
             </div>
           </div>
 
           {/* Current conditions grid */}
-          <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-4">
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-3 sm:gap-4">
             <LearnTip id="temperature" learnMode={learnMode}><MetricCard label="Temperature" value={`${cur.temp_c}\u00B0C`} sub={`${cur.temp_f}\u00B0F`} /></LearnTip>
             <LearnTip id="feels_like" learnMode={learnMode}><MetricCard label="Feels Like" value={`${cur.feels_like_c}\u00B0C`} sub={`${cur.feels_like_f}\u00B0F`} /></LearnTip>
             <LearnTip id="humidity" learnMode={learnMode}><MetricCard label="Humidity" value={`${cur.humidity_pct}%`} sub={cur.dew_point_c != null ? `DP: ${cur.dew_point_c}\u00B0C` : ''} /></LearnTip>
@@ -962,8 +1082,8 @@
       );
 
       return (
-        <div className="max-w-7xl mx-auto p-6 space-y-6 fade-in">
-          <h2 className="text-2xl font-bold">{city.name} &mdash; 30-Day Trends</h2>
+        <div className="max-w-7xl mx-auto p-4 sm:p-6 space-y-4 sm:space-y-6 fade-in">
+          <h2 className="text-xl sm:text-2xl font-bold">{city.name} &mdash; 30-Day Trends</h2>
           <p className="text-slate-400 text-sm">{trends.dates.length} days of historical data</p>
 
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -1189,15 +1309,15 @@
       const tier2 = ['qbo', 'dmi', 'ea', 'eawr', 'scand', 'wp', 'epnp', 'tnh'];
 
       return (
-        <div className="max-w-7xl mx-auto p-6 space-y-6 fade-in">
+        <div className="max-w-7xl mx-auto p-4 sm:p-6 space-y-4 sm:space-y-6 fade-in">
           {/* Header */}
-          <div className="flex items-center justify-between flex-wrap gap-4">
+          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
             <div>
-              <h2 className="text-3xl font-bold">{'\uD83C\uDF0D'} Seasonal Outlook</h2>
+              <h2 className="text-2xl sm:text-3xl font-bold">{'\uD83C\uDF0D'} Seasonal Outlook</h2>
               <p className="text-slate-400">{city.name}, {city.country}</p>
             </div>
             <div className="flex items-center gap-2">
-              <span className="text-sm text-slate-400">Forecast horizon:</span>
+              <span className="text-sm text-slate-400 hidden sm:inline">Horizon:</span>
               {[3, 6, 12].map(m => (
                 <button key={m} onClick={() => setMonths(m)}
                   className={`px-3 py-1.5 rounded-lg text-sm font-medium transition ${months === m ? 'bg-purple-600 text-white' : 'bg-slate-700 text-slate-300 hover:bg-slate-600'}`}>

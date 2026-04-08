@@ -517,3 +517,31 @@ def upsert_seasonal_skill(city_id, method, metric, value, sample_count=0):
           _now_utc()))
     conn.commit()
 
+
+# ---------------------------------------------------------------------------
+# Data retention cleanup
+# ---------------------------------------------------------------------------
+def cleanup_old_data(forecast_days=90, observation_days=365):
+    """Delete forecasts older than forecast_days and observations older than
+    observation_days. Returns counts of deleted rows."""
+    from datetime import date, timedelta
+    conn = get_connection()
+
+    fc_cutoff = (date.today() - timedelta(days=forecast_days)).isoformat()
+    obs_cutoff = (date.today() - timedelta(days=observation_days)).isoformat()
+
+    fc_deleted = conn.execute(
+        "DELETE FROM forecasts WHERE forecast_date < ?", (fc_cutoff,)
+    ).rowcount
+    obs_deleted = conn.execute(
+        "DELETE FROM observations WHERE obs_date < ?", (obs_cutoff,)
+    ).rowcount
+    conn.commit()
+
+    if fc_deleted or obs_deleted:
+        conn.execute("PRAGMA optimize")
+        logger.info("Cleanup: deleted %d forecasts (>%dd), %d observations (>%dd)",
+                     fc_deleted, forecast_days, obs_deleted, observation_days)
+
+    return {"forecasts_deleted": fc_deleted, "observations_deleted": obs_deleted}
+

@@ -1,5 +1,11 @@
 {
-  "default_cities": ["Bratislava", "New York", "London", "Tokyo", "Sydney"],
+  "default_cities": [
+    "Bratislava",
+    "New York",
+    "London",
+    "Tokyo",
+    "Sydney"
+  ],
   "scoring": {
     "window_days": 30,
     "min_samples": 7,
@@ -9,7 +15,7 @@
       "temp_high": 0.35,
       "temp_low": 0.35,
       "precip_mm": 0.15,
-      "wind": 0.10,
+      "wind": 0.1,
       "condition": 0.05
     }
   },
@@ -32,32 +38,119 @@
   },
   "seasonal": {
     "indices": {
-      "oni":    {"url": "https://psl.noaa.gov/data/correlation/oni.data",             "format": "psl", "tier": 1},
-      "nao":    {"url": "https://psl.noaa.gov/data/correlation/nao.data",             "format": "psl", "tier": 1},
-      "ao":     {"url": "https://psl.noaa.gov/data/correlation/ao.data",              "format": "psl", "tier": 1},
-      "pdo":    {"url": "https://psl.noaa.gov/data/correlation/pdo.data",             "format": "psl", "tier": 1},
-      "amo":    {"url": "https://psl.noaa.gov/data/correlation/amon.us.data",         "format": "psl", "tier": 1},
-      "pna":    {"url": "https://psl.noaa.gov/data/correlation/pna.data",             "format": "psl", "tier": 1},
-      "soi":    {"url": "https://psl.noaa.gov/data/correlation/soi.data",             "format": "psl", "tier": 1},
-      "nino34": {"url": "https://psl.noaa.gov/data/correlation/nina34.anom.data",     "format": "psl", "tier": 3},
-      "qbo":    {"url": "https://www.cpc.ncep.noaa.gov/data/indices/qbo.u30.index",  "format": "cpc_qbo", "tier": 2},
-      "dmi":    {"url": "https://psl.noaa.gov/gcos_wgsp/Timeseries/Data/dmi.had.long.data", "format": "psl", "tier": 2},
-      "ea":     {"url": "https://psl.noaa.gov/data/correlation/ea.data",              "format": "psl", "tier": 2},
-      "scand":  {"url": "https://psl.noaa.gov/data/correlation/scand.data",           "format": "psl", "tier": 2},
-      "wp":     {"url": "https://psl.noaa.gov/data/correlation/wp.data",              "format": "psl", "tier": 2},
-      "tnh":    {"url": "https://psl.noaa.gov/data/correlation/tnh.data",             "format": "psl", "tier": 2},
-      "tna":    {"url": "https://psl.noaa.gov/data/correlation/tna.data",             "format": "psl", "tier": 3},
-      "tsa":    {"url": "https://psl.noaa.gov/data/correlation/tsa.data",             "format": "psl", "tier": 3},
-      "np":     {"url": "https://psl.noaa.gov/data/correlation/np.data",              "format": "psl", "tier": 3},
-      "aao":    {"url": "https://psl.noaa.gov/data/correlation/aao.data",             "format": "psl", "tier": 4}
+      "oni": {
+        "url": "https://psl.noaa.gov/data/correlation/oni.data",
+        "format": "psl",
+        "tier": 1
+      },
+      "nao": {
+        "url": "https://psl.noaa.gov/data/correlation/nao.data",
+        "format": "psl",
+        "tier": 1
+      },
+      "ao": {
+        "url": "https://psl.noaa.gov/data/correlation/ao.data",
+        "format": "psl",
+        "tier": 1
+      },
+      "pdo": {
+        "url": "https://psl.noaa.gov/data/correlation/pdo.data",
+        "format": "psl",
+        "tier": 1
+      },
+      "amo": {
+        "url": "https://psl.noaa.gov/data/correlation/amon.us.data",
+        "format": "psl",
+        "tier": 1
+      },
+      "pna": {
+        "url": "https://psl.noaa.gov/data/correlation/pna.data",
+        "format": "psl",
+        "tier": 1
+      },
+      "soi": {
+        "url": "https://psl.noaa.gov/data/correlation/soi.data",
+        "format": "psl",
+        "tier": 1
+      },
+      "nino34": {
+        "url": "https://psl.noaa.gov/data/correlation/nina34.anom.data",
+        "format": "psl",
+        "tier": 3
+      },
+      "qbo": {
+        "url": "https://www.cpc.ncep.noaa.gov/data/indices/qbo.u30.index",
+        "format": "cpc_qbo",
+        "tier": 2
+      },
+      "dmi": {
+        "url": "https://psl.noaa.gov/gcos_wgsp/Timeseries/Data/dmi.had.long.data",
+        "format": "psl",
+        "tier": 2
+      },
+      "ea": {
+        "url": "https://psl.noaa.gov/data/correlation/ea.data",
+        "format": "psl",
+        "tier": 2
+      },
+      "scand": {
+        "url": "https://psl.noaa.gov/data/correlation/scand.data",
+        "format": "psl",
+        "tier": 2
+      },
+      "wp": {
+        "url": "https://psl.noaa.gov/data/correlation/wp.data",
+        "format": "psl",
+        "tier": 2
+      },
+      "tnh": {
+        "url": "https://psl.noaa.gov/data/correlation/tnh.data",
+        "format": "psl",
+        "tier": 2
+      },
+      "tna": {
+        "url": "https://psl.noaa.gov/data/correlation/tna.data",
+        "format": "psl",
+        "tier": 3
+      },
+      "tsa": {
+        "url": "https://psl.noaa.gov/data/correlation/tsa.data",
+        "format": "psl",
+        "tier": 3
+      },
+      "np": {
+        "url": "https://psl.noaa.gov/data/correlation/np.data",
+        "format": "psl",
+        "tier": 3
+      },
+      "aao": {
+        "url": "https://psl.noaa.gov/data/correlation/aao.data",
+        "format": "psl",
+        "tier": 4
+      }
     },
-    "climatology_ref_period": [1991, 2020],
+    "climatology_ref_period": [
+      1991,
+      2020
+    ],
     "cache_days": 7,
     "analog": {
       "num_analogs": 10,
       "min_analogs": 5,
-      "predictor_indices": ["oni", "nao", "ao", "pdo", "amo", "pna"],
-      "predictor_lags_months": [0, 1, 2, 3],
+      "predictor_indices": [
+        "oni",
+        "nao",
+        "ao",
+        "pdo",
+        "amo",
+        "pna"
+      ],
+      "predictor_lags_months": [
+        0,
+        1,
+        2,
+        3
+      ],
       "index_weights": {
         "oni": 2.0,
         "nao": 1.5,
@@ -74,20 +167,52 @@
     "regression": {
       "ridge_lambda": 1.0,
       "min_training_years": 20,
-      "predictor_indices": ["oni", "nao", "ao", "pdo", "amo", "pna"],
-      "predictor_lags_months": [0, 1, 2]
+      "predictor_indices": [
+        "oni",
+        "nao",
+        "ao",
+        "pdo",
+        "amo",
+        "pna"
+      ],
+      "predictor_lags_months": [
+        0,
+        1,
+        2
+      ]
     },
     "composite": {
       "thresholds": {
-        "oni": {"strong_pos": 1.5, "pos": 0.5, "neg": -0.5, "strong_neg": -1.5},
-        "nao": {"pos": 0.5, "neg": -0.5},
-        "ao":  {"pos": 0.5, "neg": -0.5}
+        "oni": {
+          "strong_pos": 1.5,
+          "pos": 0.5,
+          "neg": -0.5,
+          "strong_neg": -1.5
+        },
+        "nao": {
+          "pos": 0.5,
+          "neg": -0.5
+        },
+        "ao": {
+          "pos": 0.5,
+          "neg": -0.5
+        }
       },
       "min_years_per_bin": 5
     },
     "bma": {
-      "methods": ["analog", "regression", "composite", "ecmwf_seas5"],
-      "initial_weights": [0.30, 0.25, 0.20, 0.25]
+      "methods": [
+        "analog",
+        "regression",
+        "composite",
+        "ecmwf_seas5"
+      ],
+      "initial_weights": [
+        0.3,
+        0.25,
+        0.2,
+        0.25
+      ]
     },
     "ecmwf_seasonal_url": "https://seasonal-api.open-meteo.com/v1/seasonal",
     "lead_decay_rate": 0.1

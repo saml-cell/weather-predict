@@ -196,7 +196,6 @@ def recompute_weights(city_id, window_days=None):
     source_rows = conn.execute(
         "SELECT DISTINCT source_name FROM forecasts WHERE city_id = ?", (city_id,)
     ).fetchall()
-    conn.close()
     all_sources = [r["source_name"] for r in source_rows]
 
     if not all_sources:
@@ -362,7 +361,6 @@ def recompute_weights(city_id, window_days=None):
     if "lead_time_group" not in existing_cols:
         conn.execute("ALTER TABLE source_accuracy ADD COLUMN lead_time_group TEXT DEFAULT NULL")
     conn.commit()
-    conn.close()
 
     # Store weights in database (overall)
     for source in all_sources:

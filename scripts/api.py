@@ -6,18 +6,42 @@ Serves both the API endpoints and the static frontend.
 
 Usage:
   python scripts/api.py
-  # Dashboard at http://localhost:5000
+  # Dashboard at http://<your-ip>:5000
+
+Environment variables:
+  WEATHER_API_KEY   — Required for mutating endpoints (POST/DELETE). No default.
+  CORS_ORIGINS      — Comma-separated allowed origins. Default: auto-detect.
+  WEATHER_PORT      — Server port. Default: 5000.
+  WEATHER_HOST      — Bind address. Default: 0.0.0.0 (all interfaces).
+  WEATHER_MAX_BODY  — Max request body in bytes. Default: 1048576 (1MB).
 """
 
 import json
 import logging
 import os
+import re
+import secrets
 import sys
 import time
+import functools
+import socket
 from collections import defaultdict
 from datetime import date, timedelta, datetime, timezone
 
-from flask import Flask, jsonify, request, send_from_directory
+# Load .env file if present (so WEATHER_API_KEY etc. work without manual export)
+_env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
+if os.path.isfile(_env_path):
+    with open(_env_path) as _f:
+        for _line in _f:
+            _line = _line.strip()
+            if _line and not _line.startswith("#") and "=" in _line:
+                _key, _, _val = _line.partition("=")
+                _key = _key.strip()
+                _val = _val.strip()
+                if _key and _key not in os.environ:  # don't override existing
+                    os.environ[_key] = _val
+
+from flask import Flask, jsonify, request, send_from_directory, abort
 from flask_cors import CORS
 
 logging.basicConfig(
@@ -39,26 +63,100 @@ from alerts import check_city_alerts
 
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _DASHBOARD_DIR = os.path.join(_PROJECT_DIR, "dashboard")
+_PORT = int(os.environ.get("WEATHER_PORT", 5000))
+_HOST = os.environ.get("WEATHER_HOST", "0.0.0.0")
 
 app = Flask(__name__, static_folder=_DASHBOARD_DIR, static_url_path="")
-CORS(app, origins=["http://localhost:5000", "http://127.0.0.1:5000", "http://localhost:*"])
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("WEATHER_MAX_BODY", 1048576))
 
 # ---------------------------------------------------------------------------
-# Rate limiter (in-memory) — 5 cities per hour per IP
+# CORS: auto-detect all local IPs so the dashboard works from any address
 # ---------------------------------------------------------------------------
-_rate_limit_store = defaultdict(list)  # ip -> [timestamps]
-_RATE_LIMIT_MAX = 5
-_RATE_LIMIT_WINDOW = 3600  # 1 hour in seconds
+def _build_cors_origins():
+    """Build CORS origin list. If CORS_ORIGINS env var is set, use that.
+    Otherwise auto-detect all local IPs so the dashboard works via
+    localhost, LAN IP, or Tailscale IP."""
+    env_origins = os.environ.get("CORS_ORIGINS", "").strip()
+    if env_origins:
+        return [o.strip() for o in env_origins.split(",") if o.strip()]
 
-def _check_rate_limit(ip):
+    origins = set()
+    origins.add(f"http://localhost:{_PORT}")
+    origins.add(f"http://127.0.0.1:{_PORT}")
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ip = info[4][0]
+            origins.add(f"http://{ip}:{_PORT}")
+        # Also try Tailscale / other interfaces via netifaces-like scan
+        import subprocess
+        result = subprocess.run(
+            ["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, timeout=5
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            for part in parts:
+                if "/" in part and re.match(r"\d+\.\d+\.\d+\.\d+/", part):
+                    ip = part.split("/")[0]
+                    if not ip.startswith("127."):
+                        origins.add(f"http://{ip}:{_PORT}")
+    except Exception:
+        pass
+    return list(origins)
+
+
+_cors_origins = _build_cors_origins()
+CORS(app, origins=_cors_origins)
+
+# ---------------------------------------------------------------------------
+# API key auth for mutating endpoints
+# ---------------------------------------------------------------------------
+_API_KEY = os.environ.get("WEATHER_API_KEY", "")
+
+if not _API_KEY:
+    logger.warning(
+        "WEATHER_API_KEY not set — mutating endpoints (POST/DELETE) are UNPROTECTED. "
+        "Set this env var before exposing to a network."
+    )
+
+
+def require_api_key(f):
+    """Decorator: require valid API key via X-API-Key header.
+    Disabled if WEATHER_API_KEY env var is not set (development mode).
+    """
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        if not _API_KEY:
+            return f(*args, **kwargs)
+        key = request.headers.get("X-API-Key") or request.args.get("api_key")
+        if not key or not secrets.compare_digest(key, _API_KEY):
+            logger.warning("Unauthorized %s %s from %s",
+                           request.method, request.path, request.remote_addr)
+            return jsonify({"error": "Unauthorized. Provide X-API-Key header."}), 401
+        return f(*args, **kwargs)
+    return decorated
+
+# ---------------------------------------------------------------------------
+# Rate limiter (in-memory, per-IP)
+# ---------------------------------------------------------------------------
+_rate_limit_store = defaultdict(list)  # "bucket:ip" -> [timestamps]
+
+_RATE_LIMITS = {
+    "add_city": {"max": 5, "window": 3600},       # 5 cities/hour
+    "api_read": {"max": 120, "window": 60},        # 120 reads/minute
+    "api_write": {"max": 20, "window": 60},        # 20 writes/minute
+}
+
+
+def _check_rate_limit(ip, bucket="add_city"):
     """Return True if request is allowed, False if rate-limited."""
+    limits = _RATE_LIMITS.get(bucket, _RATE_LIMITS["api_read"])
+    key = f"{bucket}:{ip}"
     now = time.time()
-    timestamps = _rate_limit_store[ip]
-    # Purge old entries
-    _rate_limit_store[ip] = [t for t in timestamps if now - t < _RATE_LIMIT_WINDOW]
-    if len(_rate_limit_store[ip]) >= _RATE_LIMIT_MAX:
+    timestamps = _rate_limit_store[key]
+    _rate_limit_store[key] = [t for t in timestamps if now - t < limits["window"]]
+    if len(_rate_limit_store[key]) >= limits["max"]:
         return False
-    _rate_limit_store[ip].append(now)
+    _rate_limit_store[key].append(now)
     return True
 
 # ---------------------------------------------------------------------------
@@ -78,23 +176,36 @@ def invalidate_forecast_cache(city_name=None):
         logger.info("All forecast cache cleared")
 
 # ---------------------------------------------------------------------------
-# Static frontend
+# Static frontend (path-traversal safe via send_from_directory)
 # ---------------------------------------------------------------------------
 _STATUS_DIR = os.path.join(os.path.expanduser("~"), ".openclaw", "workspace", "dashboard")
+
+# Allowed static file extensions — reject everything else
+_STATIC_EXTS = {".html", ".css", ".js", ".json", ".png", ".jpg", ".jpeg",
+                ".gif", ".svg", ".ico", ".woff", ".woff2", ".ttf", ".map"}
+
 
 @app.route("/")
 def serve_index():
     return send_from_directory(_DASHBOARD_DIR, "index.html")
 
+
 @app.route("/status")
 def serve_status():
     return send_from_directory(_STATUS_DIR, "status.html")
 
+
 @app.route("/<path:path>")
 def serve_static(path):
-    file_path = os.path.join(_DASHBOARD_DIR, path)
-    if os.path.isfile(file_path):
-        return send_from_directory(_DASHBOARD_DIR, path)
+    # Block path traversal attempts
+    if ".." in path or path.startswith("/"):
+        abort(404)
+    ext = os.path.splitext(path)[1].lower()
+    if ext in _STATIC_EXTS:
+        file_path = os.path.join(_DASHBOARD_DIR, path)
+        if os.path.isfile(file_path):
+            return send_from_directory(_DASHBOARD_DIR, path)
+    # SPA fallback for client-side routes
     return send_from_directory(_DASHBOARD_DIR, "index.html")
 
 # ---------------------------------------------------------------------------
@@ -106,14 +217,20 @@ def get_cities():
     return jsonify(cities)
 
 @app.route("/api/cities", methods=["POST"])
+@require_api_key
 def add_city():
-    if not _check_rate_limit(request.remote_addr):
+    if not _check_rate_limit(request.remote_addr, "add_city"):
         return jsonify({"error": "Rate limit exceeded. Max 5 cities per hour."}), 429
 
-    data = request.get_json()
+    data = request.get_json(silent=True)
+    if not data:
+        return jsonify({"error": "Invalid JSON body"}), 400
     city_name = data.get("name", "").strip()
     if not city_name:
         return jsonify({"error": "City name required"}), 400
+    # Sanitize: letters, spaces, hyphens, apostrophes, periods only. Max 100 chars.
+    if len(city_name) > 100 or not re.match(r"^[\w\s\-'.À-ÿ]+$", city_name):
+        return jsonify({"error": "Invalid city name"}), 400
 
     location = geocode(city_name)
     if not location:
@@ -172,6 +289,7 @@ def _add_city_to_config(city_name):
 
 
 @app.route("/api/cities/<int:city_id>", methods=["DELETE"])
+@require_api_key
 def remove_city(city_id):
     """Remove a city from tracking."""
     city = db.get_city_by_id(city_id)
@@ -369,7 +487,8 @@ def get_seasonal(city_id):
         return jsonify(result)
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.exception("Seasonal forecast error for city_id=%d", city_id)
+        return jsonify({"error": "Seasonal forecast failed"}), 500
 
 
 @app.route("/api/indices", methods=["GET"])
@@ -384,10 +503,12 @@ def get_indices():
             "last_updated": db.get_indices_fetch_time(),
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.exception("Indices fetch error")
+        return jsonify({"error": "Could not load indices"}), 500
 
 
 @app.route("/api/seasonal/climatology/<int:city_id>", methods=["POST"])
+@require_api_key
 def build_city_climatology(city_id):
     """Build/refresh climatology for a city (can be slow)."""
     city = db.get_city_by_id(city_id)
@@ -403,7 +524,8 @@ def build_city_climatology(city_id):
             "months": len(clim),
         })
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        logger.exception("Climatology build error for city_id=%d", city_id)
+        return jsonify({"error": "Climatology build failed"}), 500
 
 
 # ---------------------------------------------------------------------------
@@ -428,6 +550,7 @@ def get_alerts():
 # API: Cache invalidation (called after fetch pipeline runs)
 # ---------------------------------------------------------------------------
 @app.route("/api/cache/invalidate", methods=["POST"])
+@require_api_key
 def api_invalidate_cache():
     data = request.get_json(silent=True) or {}
     city_name = data.get("city")
@@ -435,27 +558,110 @@ def api_invalidate_cache():
     return jsonify({"status": "ok", "cleared": city_name or "all"})
 
 # ---------------------------------------------------------------------------
-# Cache-Control for GET responses
+# Request logging, rate limiting, security headers
 # ---------------------------------------------------------------------------
+@app.before_request
+def _before_request():
+    request._start_time = time.time()
+    # Global rate limit on API endpoints
+    if request.path.startswith("/api/"):
+        bucket = "api_write" if request.method in ("POST", "PUT", "DELETE") else "api_read"
+        if not _check_rate_limit(request.remote_addr, bucket):
+            return jsonify({"error": "Too many requests. Slow down."}), 429
+
+
 @app.after_request
-def add_cache_headers(response):
-    if request.method == "GET":
+def _after_request(response):
+    # Security headers
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "SAMEORIGIN"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
+    response.headers["Permissions-Policy"] = "geolocation=(self)"
+    # Remove server header
+    response.headers.pop("Server", None)
+
+    # Cache-Control for API GET responses
+    if request.method == "GET" and request.path.startswith("/api/"):
         response.headers["Cache-Control"] = "public, max-age=300"
+
+    # Request logging
+    elapsed = (time.time() - getattr(request, "_start_time", time.time())) * 1000
+    if request.path.startswith("/api/"):
+        logger.info("%s %s %d %.0fms %s", request.method, request.path,
+                    response.status_code, elapsed, request.remote_addr)
     return response
 
+
 # ---------------------------------------------------------------------------
-# Health check
+# Global error handlers — return JSON, never leak stack traces
+# ---------------------------------------------------------------------------
+@app.errorhandler(404)
+def not_found(e):
+    if request.path.startswith("/api/"):
+        return jsonify({"error": "Not found"}), 404
+    return send_from_directory(_DASHBOARD_DIR, "index.html")
+
+
+@app.errorhandler(413)
+def payload_too_large(e):
+    return jsonify({"error": "Request body too large (max 1MB)"}), 413
+
+
+@app.errorhandler(429)
+def rate_limited(e):
+    return jsonify({"error": "Too many requests"}), 429
+
+
+@app.errorhandler(500)
+def internal_error(e):
+    logger.exception("Internal server error on %s %s", request.method, request.path)
+    return jsonify({"error": "Internal server error"}), 500
+
+
+# ---------------------------------------------------------------------------
+# Health check (detailed)
 # ---------------------------------------------------------------------------
 @app.route("/api/health", methods=["GET"])
 def health_check():
     cities = db.get_all_cities()
-    return jsonify({"status": "ok", "version": "1.0.0", "cities": len(cities)})
+    conn = db.get_connection()
+
+    obs_count = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
+    forecast_count = conn.execute("SELECT COUNT(*) FROM forecasts").fetchone()[0]
+    last_fetch = conn.execute(
+        "SELECT MAX(fetched_at) FROM forecasts"
+    ).fetchone()[0]
+
+    # DB file size
+    db_size_mb = None
+    if os.path.exists(db.DB_PATH):
+        db_size_mb = round(os.path.getsize(db.DB_PATH) / (1024 * 1024), 2)
+
+    return jsonify({
+        "status": "ok",
+        "version": "1.1.0",
+        "cities": len(cities),
+        "observations": obs_count,
+        "forecasts": forecast_count,
+        "last_fetch": last_fetch,
+        "db_size_mb": db_size_mb,
+        "cache_entries": len(_forecast_cache),
+        "auth_enabled": bool(_API_KEY),
+    })
 
 # ---------------------------------------------------------------------------
 # Run
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    logger.info("Dashboard: http://localhost:5000")
-    logger.info("API: http://localhost:5000/api/cities")
     logger.info("Serving frontend from: %s", _DASHBOARD_DIR)
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    logger.info("Auth: %s", "ENABLED" if _API_KEY else "DISABLED (set WEATHER_API_KEY)")
+    logger.info("CORS origins: %s", _cors_origins)
+    logger.info("")
+    logger.info("Access the dashboard at any of:")
+    for origin in sorted(_cors_origins):
+        logger.info("  %s", origin)
+    logger.info("")
+    logger.info("API: <address>/api/cities")
+    logger.info("Health: <address>/api/health")
+    app.run(host=_HOST, port=_PORT, debug=False)

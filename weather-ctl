@@ -1,0 +1,525 @@
+#!/usr/bin/env bash
+# weather-ctl — Manage the Weather Prediction System
+# Usage: weather-ctl <command>
+#
+# Run from anywhere: ~/Weather\ predict\ program/weather-ctl status
+
+set -euo pipefail
+
+_SELF="$(readlink -f "$0")"
+PROJECT_DIR="$(cd "$(dirname "$_SELF")" && pwd)"
+SERVICE="weather-api"
+TUNNEL_SERVICE="weather-tunnel"
+ENV_FILE="$PROJECT_DIR/.env"
+LOG_DIR="$HOME/.openclaw/logs"
+PYTHON="/usr/bin/python3"
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+ok()   { echo -e "  ${GREEN}OK${NC}  $1"; }
+fail() { echo -e "  ${RED}FAIL${NC} $1"; }
+info() { echo -e "  ${CYAN}--${NC}  $1"; }
+warn() { echo -e "  ${YELLOW}!!${NC}  $1"; }
+
+load_env() {
+    if [[ -f "$ENV_FILE" ]]; then
+        set -a
+        source "$ENV_FILE"
+        set +a
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# Commands
+# ---------------------------------------------------------------------------
+cmd_status() {
+    echo -e "${BOLD}Weather Prediction System${NC}"
+    echo ""
+
+    # API service
+    if systemctl --user is-active --quiet "$SERVICE" 2>/dev/null; then
+        ok "API server: running"
+    else
+        fail "API server: stopped"
+    fi
+
+    # Tunnel
+    if systemctl --user is-active --quiet "$TUNNEL_SERVICE" 2>/dev/null; then
+        ok "Cloudflare tunnel: running"
+    else
+        warn "Cloudflare tunnel: stopped"
+    fi
+
+    # .env / API key
+    if [[ -f "$ENV_FILE" ]] && grep -q "^WEATHER_API_KEY=" "$ENV_FILE" 2>/dev/null; then
+        local key_val
+        key_val=$(grep "^WEATHER_API_KEY=" "$ENV_FILE" | cut -d= -f2-)
+        if [[ -n "$key_val" && "$key_val" != "your_secret_key_here" ]]; then
+            ok "Auth: enabled (API key set)"
+        else
+            warn "Auth: DISABLED (.env has placeholder key)"
+        fi
+    else
+        warn "Auth: DISABLED (no .env or WEATHER_API_KEY)"
+    fi
+
+    # Network
+    echo ""
+    echo -e "${BOLD}Access URLs:${NC}"
+    local port="${WEATHER_PORT:-5000}"
+
+    # Tailscale IP (best for personal devices)
+    local ts_ip
+    ts_ip=$(ip -4 -o addr show tailscale0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+    if [[ -n "$ts_ip" ]]; then
+        echo -e "  ${GREEN}http://$ts_ip:$port${NC}  ← Tailscale (PC + iPhone)"
+    fi
+
+    # Cloudflare tunnel URL
+    local tunnel_url
+    tunnel_url=$(journalctl --user -u "$TUNNEL_SERVICE" --no-pager -n 50 2>/dev/null | grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -1)
+    if [[ -n "$tunnel_url" ]]; then
+        echo -e "  ${GREEN}$tunnel_url${NC}  ← Public (anywhere)"
+    fi
+
+    # LAN
+    echo "  http://localhost:$port  ← Local"
+    ip -4 -o addr show 2>/dev/null | while read -r _ iface _ addr _; do
+        local ip="${addr%%/*}"
+        [[ "$ip" == "127."* || "$iface" == "tailscale0" || "$iface" == "docker0" || "$iface" == br-* ]] && continue
+        echo "  http://$ip:$port  ← LAN ($iface)"
+    done
+
+    # Health check
+    echo ""
+    load_env
+    local port="${WEATHER_PORT:-5000}"
+    local health
+    if health=$(curl -sf "http://localhost:$port/api/health" 2>/dev/null); then
+        echo -e "${BOLD}Health:${NC}"
+        echo "$health" | python3 -m json.tool 2>/dev/null || echo "$health"
+    else
+        warn "API not responding on port $port"
+    fi
+
+    # DB size
+    local db_file="$PROJECT_DIR/data/weather.db"
+    if [[ -f "$db_file" ]]; then
+        local size
+        size=$(du -h "$db_file" | cut -f1)
+        echo ""
+        info "Database: $size ($db_file)"
+    fi
+
+    # Cron jobs
+    echo ""
+    echo -e "${BOLD}Cron jobs:${NC}"
+    crontab -l 2>/dev/null | grep -i "weather" | while read -r line; do
+        echo "  $line"
+    done
+
+    # Recent logs
+    echo ""
+    echo -e "${BOLD}Recent API log:${NC}"
+    journalctl --user -u "$SERVICE" --no-pager -n 5 --output=short-iso 2>/dev/null || \
+        warn "No journal access"
+}
+
+cmd_start() {
+    info "Starting weather API..."
+    systemctl --user start "$SERVICE"
+    sleep 1
+    if systemctl --user is-active --quiet "$SERVICE"; then
+        ok "API server started"
+    else
+        fail "API server failed to start"
+        journalctl --user -u "$SERVICE" --no-pager -n 10
+        return 1
+    fi
+}
+
+cmd_stop() {
+    info "Stopping weather API..."
+    systemctl --user stop "$SERVICE"
+    ok "API server stopped"
+}
+
+cmd_restart() {
+    info "Restarting weather API..."
+    systemctl --user restart "$SERVICE"
+    sleep 1
+    if systemctl --user is-active --quiet "$SERVICE"; then
+        ok "API server restarted"
+    else
+        fail "API server failed to restart"
+        journalctl --user -u "$SERVICE" --no-pager -n 10
+        return 1
+    fi
+}
+
+cmd_logs() {
+    local lines="${1:-50}"
+    journalctl --user -u "$SERVICE" --no-pager -n "$lines" --output=short-iso 2>/dev/null || \
+        warn "No journal access"
+}
+
+cmd_logs_follow() {
+    journalctl --user -u "$SERVICE" -f --output=short-iso 2>/dev/null || \
+        warn "No journal access"
+}
+
+cmd_fetch() {
+    info "Running fetch pipeline..."
+    load_env
+    cd "$PROJECT_DIR"
+    $PYTHON scripts/orchestrate.py --step fetch
+}
+
+cmd_verify() {
+    info "Running verification..."
+    load_env
+    cd "$PROJECT_DIR"
+    $PYTHON scripts/verify_and_score.py
+}
+
+cmd_pipeline() {
+    info "Running full pipeline..."
+    load_env
+    cd "$PROJECT_DIR"
+    $PYTHON scripts/orchestrate.py --step all
+}
+
+cmd_setup() {
+    echo -e "${BOLD}Weather System Setup${NC}"
+    echo ""
+
+    # Create .env if needed
+    if [[ ! -f "$ENV_FILE" ]]; then
+        local api_key
+        api_key=$(openssl rand -hex 32)
+        cat > "$ENV_FILE" <<EOF
+# Weather API keys (optional — system works with free sources)
+OPENWEATHER_API_KEY=
+WEATHERAPI_KEY=
+VISUAL_CROSSING_KEY=
+
+# Server auth key — required for POST/DELETE endpoints
+WEATHER_API_KEY=$api_key
+
+# Server config
+WEATHER_PORT=5000
+WEATHER_HOST=0.0.0.0
+EOF
+        ok "Created .env with random API key"
+        echo ""
+        echo -e "  ${BOLD}Your API key:${NC} $api_key"
+        echo "  Use with: curl -H 'X-API-Key: $api_key' ..."
+        echo ""
+    else
+        ok ".env already exists"
+    fi
+
+    # Install dependencies
+    info "Checking dependencies..."
+    cd "$PROJECT_DIR"
+    if pip3 install -q -r requirements.txt 2>/dev/null; then
+        ok "Dependencies installed"
+    else
+        warn "Some dependencies failed — run 'pip3 install -r requirements.txt' manually"
+    fi
+
+    # Init database
+    info "Initializing database..."
+    if $PYTHON scripts/init_db.py 2>/dev/null; then
+        ok "Database ready"
+    else
+        warn "Database init had issues — may already exist (OK)"
+    fi
+
+    # Update systemd service
+    info "Updating systemd service..."
+    mkdir -p "$HOME/.config/systemd/user"
+    cat > "$HOME/.config/systemd/user/$SERVICE.service" <<EOF
+[Unit]
+Description=Weather Predict Dashboard API
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=$PROJECT_DIR
+EnvironmentFile=$ENV_FILE
+ExecStart=$HOME/.local/bin/gunicorn -w 2 -b 0.0.0.0:5000 --access-logfile - --error-logfile - --timeout 120 scripts.api:app
+Environment=PATH=$HOME/.local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+EOF
+    systemctl --user daemon-reload
+    ok "Systemd service updated (gunicorn, 2 workers)"
+
+    # Create log dir
+    mkdir -p "$LOG_DIR"
+
+    echo ""
+    echo -e "${BOLD}Setup complete!${NC} Run:"
+    echo "  weather-ctl restart   # start the server"
+    echo "  weather-ctl status    # check everything"
+}
+
+cmd_key() {
+    # Show or regenerate API key
+    if [[ "${1:-}" == "regen" ]]; then
+        local new_key
+        new_key=$(openssl rand -hex 32)
+        if [[ -f "$ENV_FILE" ]]; then
+            sed -i "s/^WEATHER_API_KEY=.*/WEATHER_API_KEY=$new_key/" "$ENV_FILE"
+        else
+            echo "WEATHER_API_KEY=$new_key" > "$ENV_FILE"
+        fi
+        ok "New API key generated"
+        echo "  $new_key"
+        echo ""
+        warn "Restart the server: weather-ctl restart"
+    else
+        if [[ -f "$ENV_FILE" ]]; then
+            local key
+            key=$(grep "^WEATHER_API_KEY=" "$ENV_FILE" 2>/dev/null | cut -d= -f2-)
+            if [[ -n "$key" && "$key" != "your_secret_key_here" ]]; then
+                echo "$key"
+            else
+                warn "No API key set. Run: weather-ctl key regen"
+            fi
+        else
+            warn "No .env file. Run: weather-ctl setup"
+        fi
+    fi
+}
+
+cmd_url() {
+    # Quick way to get all access URLs
+    local port="${WEATHER_PORT:-5000}"
+    local ts_ip
+    ts_ip=$(ip -4 -o addr show tailscale0 2>/dev/null | awk '{print $4}' | cut -d/ -f1)
+    local tunnel_url
+    tunnel_url=$(journalctl --user -u "$TUNNEL_SERVICE" --no-pager -n 50 2>/dev/null | grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -1)
+
+    if [[ -n "$ts_ip" ]]; then
+        echo "http://$ts_ip:$port"
+    fi
+    if [[ -n "$tunnel_url" ]]; then
+        echo "$tunnel_url"
+    fi
+}
+
+cmd_tunnel_start() {
+    info "Starting Cloudflare tunnel..."
+    systemctl --user start "$TUNNEL_SERVICE"
+    sleep 3
+    local tunnel_url
+    tunnel_url=$(journalctl --user -u "$TUNNEL_SERVICE" --no-pager -n 50 2>/dev/null | grep -oP 'https://[a-z0-9-]+\.trycloudflare\.com' | tail -1)
+    ok "Tunnel started"
+    if [[ -n "$tunnel_url" ]]; then
+        echo -e "  ${GREEN}$tunnel_url${NC}"
+    fi
+}
+
+cmd_tunnel_stop() {
+    info "Stopping Cloudflare tunnel..."
+    systemctl --user stop "$TUNNEL_SERVICE"
+    ok "Tunnel stopped"
+}
+
+cmd_cleanup() {
+    info "Running data cleanup..."
+    load_env
+    cd "$PROJECT_DIR"
+    $PYTHON -c "import sys; sys.path.insert(0,'scripts'); import db; r=db.cleanup_old_data(); print(f'Deleted {r[\"forecasts_deleted\"]} forecasts, {r[\"observations_deleted\"]} observations')"
+}
+
+cmd_doctor() {
+    set +e  # don't exit on grep/command failures in diagnostics
+    echo -e "${BOLD}=== Weather System Diagnostic ===${NC}"
+    echo -e "Time: $(date '+%Y-%m-%d %H:%M:%S %Z')"
+    echo ""
+
+    # --- Services ---
+    echo -e "${BOLD}[Services]${NC}"
+    for svc in "$SERVICE" "$TUNNEL_SERVICE"; do
+        if systemctl --user is-active --quiet "$svc" 2>/dev/null; then
+            local uptime
+            uptime=$(systemctl --user show "$svc" --property=ActiveEnterTimestamp --value 2>/dev/null)
+            ok "$svc: running (since $uptime)"
+        else
+            fail "$svc: STOPPED"
+        fi
+    done
+
+    # --- API health ---
+    echo ""
+    echo -e "${BOLD}[API Health]${NC}"
+    load_env
+    local port="${WEATHER_PORT:-5000}"
+    local health
+    if health=$(curl -sf --max-time 5 "http://localhost:$port/api/health" 2>/dev/null); then
+        echo "$health" | $PYTHON -c "
+import sys, json
+h = json.load(sys.stdin)
+print(f'  Version:    {h[\"version\"]}')
+print(f'  Cities:     {h[\"cities\"]}')
+print(f'  Forecasts:  {h[\"forecasts\"]}')
+print(f'  Obs:        {h[\"observations\"]}')
+print(f'  DB size:    {h[\"db_size_mb\"]} MB')
+print(f'  Cache:      {h[\"cache_entries\"]} entries')
+print(f'  Auth:       {\"ENABLED\" if h[\"auth_enabled\"] else \"DISABLED\"}')
+print(f'  Last fetch: {h[\"last_fetch\"]}')
+" 2>/dev/null
+    else
+        fail "API not responding on port $port"
+    fi
+
+    # --- Data freshness ---
+    echo ""
+    echo -e "${BOLD}[Data Freshness]${NC}"
+    cd "$PROJECT_DIR"
+    $PYTHON "$PROJECT_DIR/scripts/doctor_freshness.py" || warn "Could not check data freshness"
+
+    # --- Recent errors ---
+    echo ""
+    echo -e "${BOLD}[Recent Errors (last 24h)]${NC}"
+    local err_count
+    err_count=$(journalctl --user -u "$SERVICE" --since "24 hours ago" --no-pager 2>/dev/null | grep -ciE "error|exception|traceback|fail" || echo 0)
+    if [[ "$err_count" -gt 0 ]]; then
+        warn "$err_count error lines in API logs"
+        journalctl --user -u "$SERVICE" --since "24 hours ago" --no-pager 2>/dev/null | grep -iE "error|exception|traceback|fail" | tail -5 | while read -r line; do
+            echo "    $line"
+        done
+    else
+        ok "No errors in API logs"
+    fi
+
+    local cron_errors=0
+    for logfile in "$HOME/.openclaw/logs"/weather-*.log; do
+        [[ -f "$logfile" ]] || continue
+        local recent_errs
+        recent_errs=$(find "$logfile" -mtime -1 -exec grep -ciE "error|exception|traceback|fail" {} \; 2>/dev/null || echo 0)
+        if [[ "$recent_errs" -gt 0 ]]; then
+            warn "$(basename "$logfile"): $recent_errs error lines"
+            cron_errors=$((cron_errors + recent_errs))
+        fi
+    done
+    [[ "$cron_errors" -eq 0 ]] && ok "No errors in cron logs"
+
+    # --- Disk ---
+    echo ""
+    echo -e "${BOLD}[Disk]${NC}"
+    local db_size proj_size
+    db_size=$(du -sh "$PROJECT_DIR/data/weather.db" 2>/dev/null | cut -f1)
+    proj_size=$(du -sh "$PROJECT_DIR" 2>/dev/null | cut -f1)
+    local disk_free
+    disk_free=$(df -h "$PROJECT_DIR" 2>/dev/null | tail -1 | awk '{print $4}')
+    info "DB: $db_size | Project: $proj_size | Disk free: $disk_free"
+
+    # --- Cron ---
+    echo ""
+    echo -e "${BOLD}[Cron Schedule]${NC}"
+    local cron_count
+    cron_count=$(crontab -l 2>/dev/null | grep -ci "weather" || echo 0)
+    if [[ "$cron_count" -gt 0 ]]; then
+        ok "$cron_count weather cron jobs active"
+    else
+        warn "No weather cron jobs found"
+    fi
+
+    # --- Access ---
+    echo ""
+    echo -e "${BOLD}[Access URLs]${NC}"
+    cmd_url
+
+    # --- Backlog ---
+    echo ""
+    echo -e "${BOLD}[Backlog]${NC}"
+    local backlog="$PROJECT_DIR/BACKLOG.md"
+    if [[ -f "$backlog" ]]; then
+        local p0_count p1_count
+        p0_count=$(grep -c "^\- \[" "$backlog" 2>/dev/null || echo 0)
+        local open_count
+        open_count=$(grep -c "^\- \[ \]" "$backlog" 2>/dev/null || echo 0)
+        local done_count
+        done_count=$(grep -c "^\- \[x\]" "$backlog" 2>/dev/null || echo 0)
+        info "$open_count open, $done_count done"
+    else
+        info "No BACKLOG.md yet"
+    fi
+
+    echo ""
+    echo -e "${BOLD}=== Diagnostic complete ===${NC}"
+    set -e
+}
+
+cmd_help() {
+    echo -e "${BOLD}weather-ctl${NC} — Manage the Weather Prediction System"
+    echo ""
+    echo -e "${BOLD}Service:${NC}"
+    echo "  status          Show full system status"
+    echo "  start           Start the API server"
+    echo "  stop            Stop the API server"
+    echo "  restart         Restart the API server"
+    echo "  logs [N]        Show last N log lines (default: 50)"
+    echo "  logs-follow     Follow logs in real time"
+    echo ""
+    echo -e "${BOLD}Pipeline:${NC}"
+    echo "  fetch           Fetch weather from all sources"
+    echo "  verify          Run verification & scoring"
+    echo "  pipeline        Run full pipeline (fetch + model + verify)"
+    echo "  cleanup         Remove old forecasts/observations"
+    echo "  doctor          Full diagnostic (run at start of Claude session)"
+    echo ""
+    echo -e "${BOLD}Setup:${NC}"
+    echo "  setup           First-time setup (deps, DB, .env, systemd)"
+    echo "  key             Show current API key"
+    echo "  key regen       Generate new random API key"
+    echo ""
+    echo -e "${BOLD}Access:${NC}"
+    echo "  url             Show access URLs (quick copy-paste)"
+    echo "  tunnel-start    Start Cloudflare tunnel"
+    echo "  tunnel-stop     Stop Cloudflare tunnel"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+case "${1:-help}" in
+    status)       cmd_status ;;
+    start)        cmd_start ;;
+    stop)         cmd_stop ;;
+    restart)      cmd_restart ;;
+    logs)         cmd_logs "${2:-50}" ;;
+    logs-follow)  cmd_logs_follow ;;
+    fetch)        cmd_fetch ;;
+    verify)       cmd_verify ;;
+    pipeline)     cmd_pipeline ;;
+    cleanup)      cmd_cleanup ;;
+    doctor)       cmd_doctor ;;
+    setup)        cmd_setup ;;
+    key)          cmd_key "${2:-}" ;;
+    url)          cmd_url ;;
+    tunnel-start) cmd_tunnel_start ;;
+    tunnel-stop)  cmd_tunnel_stop ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        echo "Unknown command: $1"
+        cmd_help
+        exit 1
+        ;;
+esac

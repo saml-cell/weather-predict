@@ -68,10 +68,16 @@ PIPELINE_STEPS = {
                 "per_city": False,
         "extra_args": [],
     },
+    "cleanup": {
+        "script": None,  # handled inline
+        "description": "Clean up old forecasts and observations",
+        "per_city": False,
+        "extra_args": [],
+    },
     "all": None,  # Special: runs full pipeline
 }
 
-FULL_PIPELINE = ["init", "fetch", "indices", "collect", "model", "verify"]
+FULL_PIPELINE = ["init", "fetch", "indices", "collect", "model", "verify", "cleanup"]
 
 
 def load_cities() -> list[str]:
@@ -120,8 +126,32 @@ def run_command(cmd: list[str], label: str) -> dict:
         return {"label": label, "success": False, "error": str(e)}
 
 
+def run_cleanup_step() -> dict:
+    """Run data retention cleanup inline (no subprocess needed)."""
+    print(f"\n{'='*60}")
+    print(f"  Clean up old forecasts and observations")
+    print(f"{'='*60}")
+    start_time = time.time()
+    try:
+        sys.path.insert(0, str(SCRIPTS_DIR))
+        import db as _db
+        result = _db.cleanup_old_data(forecast_days=90, observation_days=365)
+        elapsed = time.time() - start_time
+        print(f"    OK  cleanup ({elapsed:.1f}s) — "
+              f"{result['forecasts_deleted']} forecasts, "
+              f"{result['observations_deleted']} observations removed")
+        return {"step": "cleanup", "success": True, "elapsed": elapsed}
+    except Exception as e:
+        elapsed = time.time() - start_time
+        print(f"    FAIL cleanup ({elapsed:.1f}s): {e}")
+        return {"step": "cleanup", "success": False, "elapsed": elapsed, "error": str(e)}
+
+
 def run_step(step_name: str) -> dict:
     """Run a single pipeline step and return result."""
+    if step_name == "cleanup":
+        return run_cleanup_step()
+
     step = PIPELINE_STEPS[step_name]
     script_path = SCRIPTS_DIR / step["script"]
 
