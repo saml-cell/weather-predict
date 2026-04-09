@@ -1156,6 +1156,38 @@
                 </div>
               </div>
             )}
+            {/* Air Quality */}
+            {cur.aqi_index != null && (
+              <div className={`rounded-xl p-4 border ${
+                cur.aqi_index <= 2 ? 'bg-slate-800 border-slate-700' :
+                cur.aqi_index <= 3 ? 'bg-yellow-500/10 border-yellow-500/30' :
+                cur.aqi_index <= 4 ? 'bg-orange-500/10 border-orange-500/30' :
+                'bg-red-500/10 border-red-500/30'
+              }`}>
+                <div className="text-xs text-slate-400 uppercase tracking-wide mb-1">Air Quality</div>
+                <div className="flex items-center gap-2">
+                  <span className={`inline-block w-8 h-8 rounded-full flex items-center justify-center text-sm font-bold text-white ${
+                    cur.aqi_index <= 1 ? 'bg-green-500' :
+                    cur.aqi_index <= 2 ? 'bg-yellow-500' :
+                    cur.aqi_index <= 3 ? 'bg-orange-500' :
+                    cur.aqi_index <= 4 ? 'bg-red-500' :
+                    cur.aqi_index <= 5 ? 'bg-purple-500' : 'bg-rose-900'
+                  }`} style={{display:'inline-flex',alignItems:'center',justifyContent:'center'}}>
+                    {cur.aqi_index}
+                  </span>
+                  <div>
+                    <div className="text-sm font-medium">{
+                      cur.aqi_index <= 1 ? 'Good' :
+                      cur.aqi_index <= 2 ? 'Moderate' :
+                      cur.aqi_index <= 3 ? 'Unhealthy (Sensitive)' :
+                      cur.aqi_index <= 4 ? 'Unhealthy' :
+                      cur.aqi_index <= 5 ? 'Very Unhealthy' : 'Hazardous'
+                    }</div>
+                    {cur.pm25 != null && <div className="text-xs text-slate-400">PM2.5: {cur.pm25} | PM10: {cur.pm10 ?? '-'}</div>}
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Dew point info */}

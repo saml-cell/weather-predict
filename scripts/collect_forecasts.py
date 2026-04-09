@@ -57,11 +57,13 @@ def fetch_all_sources(city):
 def store_forecasts(city_id, results, fetched_at):
     """Store all forecast data from all sources into the database."""
     rows = []
+    today = fetched_at[:10] if fetched_at else None
     for result in results:
         source_name = result["source"]
         current = result.get("current", {})
 
         for day in result.get("daily", []):
+            is_today = day.get("date") == today
             rows.append((
                 city_id,
                 source_name,
@@ -73,8 +75,8 @@ def store_forecasts(city_id, results, fetched_at):
                 day.get("precip_mm"),
                 day.get("wind_max_kmh"),
                 normalize_condition(day.get("condition", "")),
-                current.get("pressure_hpa"),
-                current.get("humidity"),
+                current.get("pressure_hpa") if is_today else None,
+                current.get("humidity") if is_today else None,
                 json.dumps(day),
             ))
 

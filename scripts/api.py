@@ -268,17 +268,17 @@ def add_city():
 
     # Trigger background initial fetch
     import threading
-    def _initial_fetch(cid, name, lat, lon):
+    def _initial_fetch(cid, city_dict):
         try:
             from collect_forecasts import fetch_all_sources, store_forecasts
             from datetime import datetime, timezone as tz
-            logger.info("Initial fetch for new city: %s", name)
-            results = fetch_all_sources(city)
+            logger.info("Initial fetch for new city: %s", city_dict.get("name"))
+            results = fetch_all_sources(city_dict)
             store_forecasts(cid, results, datetime.now(tz.utc).isoformat())
-            logger.info("Initial fetch done for %s: %d sources", name, len(results))
+            logger.info("Initial fetch done for %s: %d sources", city_dict.get("name"), len(results))
         except Exception as e:
-            logger.error("Initial fetch failed for %s: %s", name, e)
-    threading.Thread(target=_initial_fetch, args=(city_id, location["name"], location["lat"], location["lon"]), daemon=True).start()
+            logger.error("Initial fetch failed for %s: %s", city_dict.get("name"), e)
+    threading.Thread(target=_initial_fetch, args=(city_id, dict(city)), daemon=True).start()
 
     logger.info("New city added: %s (%s) id=%d", location["name"], location["country"], city_id)
     return jsonify({**city, "just_added": True}), 201
