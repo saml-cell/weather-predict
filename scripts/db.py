@@ -33,6 +33,7 @@ CONFIG_PATH = os.path.join(_PROJECT_DIR, "config.json")
 # ---------------------------------------------------------------------------
 _config_cache = None
 _config_mtime = None
+_config_lock = threading.Lock()
 
 def load_config():
     """Load config.json. Caches after first read, reloads if file changed."""
@@ -41,7 +42,11 @@ def load_config():
         mtime = os.path.getmtime(CONFIG_PATH)
     except OSError:
         mtime = None
-    if _config_cache is None or mtime != _config_mtime:
+    if _config_cache is not None and mtime == _config_mtime:
+        return _config_cache
+    with _config_lock:
+        if _config_cache is not None and mtime == _config_mtime:
+            return _config_cache
         with open(CONFIG_PATH, "r") as f:
             _config_cache = json.load(f)
         _config_mtime = mtime

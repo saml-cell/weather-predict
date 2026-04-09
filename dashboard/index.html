@@ -817,7 +817,10 @@
         try {
           const result = await api.addCity(newCity);
           if (!result.error) {
-            setCities(prev => [...prev, result]);
+            setCities(prev => {
+              if (prev.find(c => c.id === result.id)) return prev;
+              return [...prev, result];
+            });
             setNewCity('');
             mapInstanceRef.current?.flyTo([result.lat, result.lon], 6, { duration: 1.5 });
           }

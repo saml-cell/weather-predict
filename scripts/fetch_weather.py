@@ -798,13 +798,14 @@ def _fetch_ecmwf_ensemble(lat, lon, dates):
     hourly = raw["hourly"]
     times = hourly.get("time", [])
 
-    # Collect all temperature member columns (temperature_2m_member01 ... member50 + temperature_2m)
+    # Collect ensemble member columns only (temperature_2m_member01 ... member50)
+    # Exclude the deterministic/control run (exact key "temperature_2m" / "precipitation")
     temp_members = {}
     precip_members = {}
     for key, values in hourly.items():
-        if key.startswith("temperature_2m"):
+        if key.startswith("temperature_2m_member"):
             temp_members[key] = values
-        elif key.startswith("precipitation"):
+        elif key.startswith("precipitation_member"):
             precip_members[key] = values
 
     if not temp_members:
@@ -1197,7 +1198,7 @@ def main():
 
     # 2. Fetch from all sources in parallel
     results = []
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=7) as pool:
         futures = {
             pool.submit(fetch_open_meteo, lat, lon, location.get("timezone", "auto")): "Open-Meteo",
             pool.submit(fetch_wttr, args.city): "wttr.in",
@@ -1205,6 +1206,7 @@ def main():
             pool.submit(fetch_weatherapi, lat, lon): "WeatherAPI",
             pool.submit(fetch_visual_crossing, lat, lon): "VisualCrossing",
             pool.submit(fetch_noaa_nws, args.city, lat, lon): "NOAA_NWS",
+            pool.submit(fetch_ecmwf, lat, lon): "ECMWF",
         }
         for future in as_completed(futures):
             name = futures[future]

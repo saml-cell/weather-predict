@@ -42,14 +42,18 @@ THRESHOLDS = {
 # ---------------------------------------------------------------------------
 def get_official_alerts(city_name):
     """Fetch official weather service alerts from WeatherAPI for a city.
-    Returns a list of alert dicts with type='official'."""
-    from weighted_forecast import produce_forecast
+    Returns a list of alert dicts with type='official'.
+    Uses WeatherAPI directly instead of the full forecast pipeline."""
+    from fetch_weather import fetch_weatherapi, geocode
     try:
-        forecast = produce_forecast(city_name)
-        if not forecast or "error" in forecast:
+        loc = geocode(city_name)
+        if not loc:
+            return []
+        result = fetch_weatherapi(loc["lat"], loc["lon"])
+        if not result:
             return []
         official = []
-        for alert in forecast.get("alerts", []):
+        for alert in result.get("alerts", []):
             official.append({
                 "city": city_name,
                 "date": alert.get("effective", ""),
@@ -97,7 +101,7 @@ def check_city_alerts(city_id, city_name):
         r = dict(row)
         d = r["forecast_date"]
 
-        if r.get("temp_high_c") and r["temp_high_c"] >= THRESHOLDS["extreme_heat_c"]:
+        if r.get("temp_high_c") is not None and r["temp_high_c"] >= THRESHOLDS["extreme_heat_c"]:
             key = (d, "extreme_heat")
             if key not in seen:
                 alerts.append({
@@ -107,7 +111,7 @@ def check_city_alerts(city_id, city_name):
                 })
                 seen.add(key)
 
-        if r.get("temp_low_c") and r["temp_low_c"] <= THRESHOLDS["extreme_cold_c"]:
+        if r.get("temp_low_c") is not None and r["temp_low_c"] <= THRESHOLDS["extreme_cold_c"]:
             key = (d, "extreme_cold")
             if key not in seen:
                 alerts.append({
@@ -117,7 +121,7 @@ def check_city_alerts(city_id, city_name):
                 })
                 seen.add(key)
 
-        if r.get("precip_mm") and r["precip_mm"] >= THRESHOLDS["heavy_precip_mm"]:
+        if r.get("precip_mm") is not None and r["precip_mm"] >= THRESHOLDS["heavy_precip_mm"]:
             key = (d, "heavy_precip")
             if key not in seen:
                 alerts.append({
@@ -127,7 +131,7 @@ def check_city_alerts(city_id, city_name):
                 })
                 seen.add(key)
 
-        if r.get("wind_max_kmh") and r["wind_max_kmh"] >= THRESHOLDS["strong_wind_kmh"]:
+        if r.get("wind_max_kmh") is not None and r["wind_max_kmh"] >= THRESHOLDS["strong_wind_kmh"]:
             key = (d, "strong_wind")
             if key not in seen:
                 alerts.append({
