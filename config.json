@@ -1,10 +1,10 @@
 {
   "default_cities": [
-    "Bratislava",
     "New York",
     "London",
     "Tokyo",
-    "Sydney"
+    "Sydney",
+    "Paris"
   ],
   "scoring": {
     "window_days": 30,
@@ -127,6 +127,11 @@
         "url": "https://psl.noaa.gov/data/correlation/aao.data",
         "format": "psl",
         "tier": 4
+      },
+      "mjo": {
+        "url": "https://www.cpc.ncep.noaa.gov/products/precip/CWlink/daily_mjo_index/pentad.mjo.index.b50.current.ascii",
+        "format": "mjo",
+        "tier": 2
       }
     },
     "climatology_ref_period": [
@@ -143,7 +148,8 @@
         "ao",
         "pdo",
         "amo",
-        "pna"
+        "pna",
+        "mjo_amplitude"
       ],
       "predictor_lags_months": [
         0,
@@ -161,7 +167,8 @@
         "ea": 0.8,
         "scand": 0.6,
         "dmi": 0.7,
-        "soi": 0.5
+        "soi": 0.5,
+        "mjo_amplitude": 0.18
       }
     },
     "regression": {
@@ -173,7 +180,8 @@
         "ao",
         "pdo",
         "amo",
-        "pna"
+        "pna",
+        "mjo_amplitude"
       ],
       "predictor_lags_months": [
         0,

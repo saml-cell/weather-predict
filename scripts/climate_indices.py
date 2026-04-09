@@ -93,13 +93,87 @@ def fetch_url(url, timeout=30):
         return resp.read().decode("utf-8", errors="replace")
 
 
+def parse_mjo_format(text):
+    """Parse CPC MJO pentad index format.
+
+    The file has header lines, then rows like:
+      YEAR  PENTAD  RMM1  RMM2  PHASE  AMPLITUDE
+    We extract the most recent values per month and store amplitude as the
+    index value. Phase is encoded as value = phase + amplitude/100 so both
+    can be recovered.  We also store separate mjo_phase and mjo_amplitude
+    index rows.
+
+    Returns: list of (year, month, value) for 'mjo_amplitude',
+             plus separate lists for mjo_phase.
+    """
+    amp_results = []
+    phase_results = []
+    lines = text.strip().split("\n")
+
+    # Track latest per (year, month) to avoid duplicates
+    monthly_amp = {}   # (year, month) -> [amplitudes]
+    monthly_phase = {} # (year, month) -> [phases]
+
+    for line in lines:
+        parts = line.split()
+        if len(parts) < 5:
+            continue
+        try:
+            year = int(parts[0])
+            if year < 1900 or year > 2100:
+                continue
+            pentad = int(parts[1])
+            rmm1 = float(parts[2])
+            rmm2 = float(parts[3])
+            phase = int(parts[4])
+            amplitude = float(parts[5]) if len(parts) > 5 else (rmm1**2 + rmm2**2)**0.5
+        except (ValueError, IndexError):
+            continue
+
+        if phase < 1 or phase > 8:
+            continue
+
+        # Estimate month from pentad (pentad 1 = Jan 1-5, ~6 pentads/month)
+        month = min(12, max(1, (pentad - 1) // 6 + 1))
+        key = (year, month)
+        monthly_amp.setdefault(key, []).append(amplitude)
+        monthly_phase.setdefault(key, []).append(phase)
+
+    for (year, month), amps in monthly_amp.items():
+        avg_amp = sum(amps) / len(amps)
+        amp_results.append((year, month, round(avg_amp, 3)))
+
+    for (year, month), phases in monthly_phase.items():
+        # Use mode (most common phase) for the month
+        from collections import Counter
+        mode_phase = Counter(phases).most_common(1)[0][0]
+        phase_results.append((year, month, float(mode_phase)))
+
+    return amp_results, phase_results
+
+
 def fetch_single_index(index_name, config):
     """Fetch and parse one index. Returns (index_name, count, error)."""
     url = config["url"]
     fmt = config.get("format", "psl")
     try:
         text = fetch_url(url)
-        if fmt == "cpc_qbo":
+
+        if fmt == "mjo":
+            amp_records, phase_records = parse_mjo_format(text)
+            total = 0
+            if amp_records:
+                rows = [("mjo_amplitude", y, m, v) for y, m, v in amp_records]
+                db.insert_climate_indices_batch(rows)
+                total += len(rows)
+            if phase_records:
+                rows = [("mjo_phase", y, m, v) for y, m, v in phase_records]
+                db.insert_climate_indices_batch(rows)
+                total += len(rows)
+            if total == 0:
+                return (index_name, 0, "No MJO data parsed")
+            return (index_name, total, None)
+        elif fmt == "cpc_qbo":
             records = parse_cpc_qbo_format(text)
         else:
             records = parse_psl_format(text)
@@ -233,6 +307,17 @@ def get_current_index_state():
             entry["phase"] = "warm" if val > 0 else "cool"
         elif name == "qbo":
             entry["phase"] = "westerly" if val > 0 else "easterly"
+        elif name == "mjo_phase":
+            entry["phase"] = f"phase_{int(val)}"
+        elif name == "mjo_amplitude":
+            if val >= 1.5:
+                entry["phase"] = "strong"
+            elif val >= 1.0:
+                entry["phase"] = "moderate"
+            elif val >= 0.5:
+                entry["phase"] = "weak"
+            else:
+                entry["phase"] = "inactive"
         else:
             entry["phase"] = classify_binary(val)
 

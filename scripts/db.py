@@ -32,13 +32,19 @@ CONFIG_PATH = os.path.join(_PROJECT_DIR, "config.json")
 # Config
 # ---------------------------------------------------------------------------
 _config_cache = None
+_config_mtime = None
 
 def load_config():
-    """Load config.json. Caches after first read."""
-    global _config_cache
-    if _config_cache is None:
+    """Load config.json. Caches after first read, reloads if file changed."""
+    global _config_cache, _config_mtime
+    try:
+        mtime = os.path.getmtime(CONFIG_PATH)
+    except OSError:
+        mtime = None
+    if _config_cache is None or mtime != _config_mtime:
         with open(CONFIG_PATH, "r") as f:
             _config_cache = json.load(f)
+        _config_mtime = mtime
     return _config_cache
 
 # ---------------------------------------------------------------------------
@@ -129,15 +135,15 @@ _CONDITION_MAP = [
     ("rime fog", "fog"),
     ("fog", "fog"),
     ("haze", "fog"),
-    # Cloudy
-    ("overcast", "cloudy"),
-    ("broken clouds", "cloudy"),
-    ("cloudy", "cloudy"),
-    # Partly cloudy
+    # Partly cloudy (before "cloudy" so more-specific matches first)
     ("partly cloudy", "partly_cloudy"),
     ("partly sunny", "partly_cloudy"),
     ("scattered clouds", "partly_cloudy"),
     ("few clouds", "partly_cloudy"),
+    # Cloudy
+    ("overcast", "cloudy"),
+    ("broken clouds", "cloudy"),
+    ("cloudy", "cloudy"),
     # Clear
     ("mainly clear", "clear"),
     ("clear sky", "clear"),
@@ -188,12 +194,15 @@ def insert_city(name, country, lat, lon, timezone="auto"):
     if existing:
         return existing["id"]
     conn.execute(
-        "INSERT INTO cities (name, country, lat, lon, timezone, added_at) VALUES (?, ?, ?, ?, ?, ?)",
+        "INSERT OR IGNORE INTO cities (name, country, lat, lon, timezone, added_at) VALUES (?, ?, ?, ?, ?, ?)",
         (name, country, lat, lon, timezone, _now_utc())
     )
     conn.commit()
-    city_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    return city_id
+    row = conn.execute(
+        "SELECT id FROM cities WHERE ROUND(lat, 2) = ROUND(?, 2) AND ROUND(lon, 2) = ROUND(?, 2)",
+        (lat, lon)
+    ).fetchone()
+    return row["id"]
 
 # ---------------------------------------------------------------------------
 # Forecast operations
@@ -319,22 +328,23 @@ def get_weights(city_id):
             "mae": r["mae"],
             "accuracy_pct": r["accuracy_pct"],
             "sample_count": r["sample_count"],
+            "bias": r.get("bias"),
         }
     return weights
 
 def upsert_accuracy(city_id, source_name, metric, mae=None, accuracy_pct=None,
                     weight=0.0, sample_count=0, window_days=30,
-                    bias=None, lead_time_group=None):
+                    bias=None, lead_time_group=None, rmse=None):
     """Insert or update accuracy score for a source/metric/city combo."""
     conn = get_connection()
     conn.execute("""
         INSERT OR REPLACE INTO source_accuracy
         (city_id, source_name, metric, mae, accuracy_pct, weight,
-         sample_count, window_days, computed_at, bias, lead_time_group)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         sample_count, window_days, computed_at, bias, lead_time_group, rmse)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     """, (city_id, source_name, metric, mae, accuracy_pct, weight,
           sample_count, window_days, _now_utc(),
-          bias, lead_time_group))
+          bias, lead_time_group, rmse))
     conn.commit()
 
 
@@ -506,6 +516,26 @@ def get_seasonal_forecasts(city_id, target_year, target_month):
 # ---------------------------------------------------------------------------
 # Seasonal skill operations
 # ---------------------------------------------------------------------------
+def get_seasonal_skill(city_id):
+    """Load seasonal skill scores for all methods.
+
+    Returns: {method: {metric: value}} e.g. {"analog": {"rpss": 0.15, "acc": 0.4}}
+    """
+    conn = get_connection()
+    rows = conn.execute(
+        "SELECT method, metric, value FROM seasonal_skill WHERE city_id = ?",
+        (city_id,)
+    ).fetchall()
+    skills = {}
+    for row in rows:
+        r = dict(row)
+        method = r["method"]
+        if method not in skills:
+            skills[method] = {}
+        skills[method][r["metric"]] = r["value"]
+    return skills
+
+
 def upsert_seasonal_skill(city_id, method, metric, value, sample_count=0):
     """Insert or replace a seasonal skill score."""
     conn = get_connection()

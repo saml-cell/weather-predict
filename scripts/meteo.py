@@ -287,7 +287,8 @@ def feels_like(temp_c, humidity_pct, wind_kmh):
 # ---------------------------------------------------------------------------
 def apply_physics_corrections(forecast, pressure_hpa=None, humidity_pct=None,
                                temp_c=None, wind_kmh=None, pressure_trend=None,
-                               max_precip_adj=15, max_temp_adj=2, elevation_m=None):
+                               max_precip_adj=15, max_temp_adj=2, elevation_m=None,
+                               apply_cc=True):
     """Apply bounded meteorological corrections to a Layer 1 ensemble forecast.
 
     This is the main entry point for Layer 2. It takes the weighted ensemble
@@ -337,8 +338,8 @@ def apply_physics_corrections(forecast, pressure_hpa=None, humidity_pct=None,
             f"Precip: {old_prob:.0f}% -> {adjusted['precip_prob']:.0f}% ({', '.join(parts)})"
         )
 
-    # --- Precipitation intensity scaling ---
-    if temp_c is not None and "precip_mm" in adjusted and adjusted["precip_mm"] is not None:
+    # --- Precipitation intensity scaling (skip for NWP sources that already model moisture physics) ---
+    if apply_cc and temp_c is not None and "precip_mm" in adjusted and adjusted["precip_mm"] is not None:
         factor = precip_intensity_factor(temp_c)
         if abs(factor - 1.0) > 0.05:  # Only note if >5% adjustment (up or down)
             old_mm = adjusted["precip_mm"]

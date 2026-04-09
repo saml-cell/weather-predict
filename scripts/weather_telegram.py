@@ -2,7 +2,7 @@
 """
 Weather Telegram Bridge — formats forecasts for Telegram delivery.
 
-Designed to integrate with OpenClaw's Telegram bot (@otrok_cigan_bot).
+Designed to integrate with OpenClaw's Telegram bot.
 Can be called standalone or from OpenClaw's weather skill.
 
 Usage:
@@ -24,7 +24,8 @@ from datetime import datetime, timezone
 from urllib.request import urlopen, Request
 from urllib.error import URLError
 
-API_BASE = "http://localhost:5000"
+_port = os.environ.get("WEATHER_PORT", "5000")
+API_BASE = os.environ.get("WEATHER_API_BASE", f"http://localhost:{_port}")
 
 # Telegram config (reads from OpenClaw config)
 OPENCLAW_CONFIG = os.path.expanduser("~/.openclaw/openclaw.json")

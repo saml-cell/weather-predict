@@ -30,6 +30,9 @@ def create_schema():
             added_at    TEXT
         );
 
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_cities_lat_lon
+            ON cities(ROUND(lat, 2), ROUND(lon, 2));
+
         CREATE TABLE IF NOT EXISTS forecasts (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             city_id         INTEGER NOT NULL REFERENCES cities(id),
@@ -77,6 +80,7 @@ def create_schema():
             computed_at     TEXT,
             bias            REAL DEFAULT NULL,
             lead_time_group TEXT DEFAULT NULL,
+            rmse            REAL DEFAULT NULL,
             UNIQUE(city_id, source_name, metric)
         );
 
@@ -159,7 +163,7 @@ def create_schema():
         );
     """)
 
-    conn.close()
+    db.close_connection()
     print(f"Database initialized at: {db.DB_PATH}")
 
     # Verify tables exist
@@ -167,7 +171,7 @@ def create_schema():
     tables = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name"
     ).fetchall()
-    conn.close()
+    db.close_connection()
     print(f"Tables: {', '.join(t['name'] for t in tables)}")
 
 

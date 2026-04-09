@@ -6,8 +6,13 @@ __pycache__/
 data/weather.db
 data/*.db-wal
 data/*.db-shm
+data/*.bak
+data/*.json
 .claude/
 .venv/
 venv/
 node_modules/
 *.log
+.DS_Store
+.pytest_cache/
+*.egg-info/

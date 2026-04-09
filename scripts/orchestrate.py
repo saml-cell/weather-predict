@@ -200,8 +200,12 @@ def invalidate_api_cache():
     """Notify the running API to clear its forecast cache."""
     try:
         from urllib.request import urlopen, Request
+        headers = {"Content-Type": "application/json"}
+        api_key = os.environ.get("WEATHER_API_KEY", "")
+        if api_key:
+            headers["X-API-Key"] = api_key
         req = Request("http://localhost:5000/api/cache/invalidate",
-                      data=b'{}', headers={"Content-Type": "application/json"},
+                      data=b'{}', headers=headers,
                       method="POST")
         urlopen(req, timeout=5)
         logger.info("API forecast cache invalidated")

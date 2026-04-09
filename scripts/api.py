@@ -23,6 +23,7 @@ import re
 import secrets
 import sys
 import time
+import threading
 import functools
 import socket
 from collections import defaultdict
@@ -62,6 +63,7 @@ from climate_indices import get_current_index_state, fetch_all_indices, build_cl
 from alerts import check_city_alerts
 
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_config_file_lock = threading.Lock()
 _DASHBOARD_DIR = os.path.join(_PROJECT_DIR, "dashboard")
 _PORT = int(os.environ.get("WEATHER_PORT", 5000))
 _HOST = os.environ.get("WEATHER_HOST", "0.0.0.0")
@@ -139,6 +141,7 @@ def require_api_key(f):
 # Rate limiter (in-memory, per-IP)
 # ---------------------------------------------------------------------------
 _rate_limit_store = defaultdict(list)  # "bucket:ip" -> [timestamps]
+_rate_limit_call_count = 0
 
 _RATE_LIMITS = {
     "add_city": {"max": 5, "window": 3600},       # 5 cities/hour
@@ -149,6 +152,7 @@ _RATE_LIMITS = {
 
 def _check_rate_limit(ip, bucket="add_city"):
     """Return True if request is allowed, False if rate-limited."""
+    global _rate_limit_call_count
     limits = _RATE_LIMITS.get(bucket, _RATE_LIMITS["api_read"])
     key = f"{bucket}:{ip}"
     now = time.time()
@@ -157,20 +161,29 @@ def _check_rate_limit(ip, bucket="add_city"):
     if len(_rate_limit_store[key]) >= limits["max"]:
         return False
     _rate_limit_store[key].append(now)
+
+    _rate_limit_call_count += 1
+    if _rate_limit_call_count % 100 == 0:
+        max_window = max(r["window"] for r in _RATE_LIMITS.values())
+        stale_keys = [k for k, v in _rate_limit_store.items()
+                      if not v or now - v[-1] > max_window]
+        for k in stale_keys:
+            del _rate_limit_store[k]
+
     return True
 
 # ---------------------------------------------------------------------------
 # Forecast cache (in-memory TTL=30min)
 # ---------------------------------------------------------------------------
-_forecast_cache = {}  # city_name -> (timestamp, result)
+_forecast_cache = {}  # city_id -> (timestamp, result)
 _FORECAST_TTL = 1800  # 30 minutes
 
 
-def invalidate_forecast_cache(city_name=None):
-    """Clear forecast cache. If city_name given, only that city; else all."""
-    if city_name:
-        _forecast_cache.pop(city_name, None)
-        logger.info("Cache invalidated for %s", city_name)
+def invalidate_forecast_cache(city_id=None):
+    """Clear forecast cache. If city_id given, only that city; else all."""
+    if city_id is not None:
+        _forecast_cache.pop(city_id, None)
+        logger.info("Cache invalidated for city_id=%s", city_id)
     else:
         _forecast_cache.clear()
         logger.info("All forecast cache cleared")
@@ -275,15 +288,16 @@ def _add_city_to_config(city_name):
     """Add city to config.json default_cities if not already there."""
     try:
         config_path = os.path.join(_PROJECT_DIR, "config.json")
-        with open(config_path) as f:
-            config = json.load(f)
-        cities = config.get("default_cities", [])
-        if city_name not in cities:
-            cities.append(city_name)
-            config["default_cities"] = cities
-            with open(config_path, "w") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
-            logger.info("Added %s to config.json default_cities", city_name)
+        with _config_file_lock:
+            with open(config_path) as f:
+                config = json.load(f)
+            cities = config.get("default_cities", [])
+            if city_name not in cities:
+                cities.append(city_name)
+                config["default_cities"] = cities
+                with open(config_path, "w") as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
+                logger.info("Added %s to config.json default_cities", city_name)
     except Exception as e:
         logger.error("Failed to update config.json: %s", e)
 
@@ -309,18 +323,19 @@ def remove_city(city_id):
     # Remove from config.json
     try:
         config_path = os.path.join(_PROJECT_DIR, "config.json")
-        with open(config_path) as f:
-            config = json.load(f)
-        cities = config.get("default_cities", [])
-        if city["name"] in cities:
-            cities.remove(city["name"])
-            config["default_cities"] = cities
-            with open(config_path, "w") as f:
-                json.dump(config, f, indent=2, ensure_ascii=False)
+        with _config_file_lock:
+            with open(config_path) as f:
+                config = json.load(f)
+            cities = config.get("default_cities", [])
+            if city["name"] in cities:
+                cities.remove(city["name"])
+                config["default_cities"] = cities
+                with open(config_path, "w") as f:
+                    json.dump(config, f, indent=2, ensure_ascii=False)
     except Exception:
         pass
 
-    invalidate_forecast_cache(city["name"])
+    invalidate_forecast_cache(city_id)
     logger.info("Removed city: %s (id=%d)", city["name"], city_id)
     return jsonify({"status": "removed", "city": city})
 
@@ -333,17 +348,43 @@ def get_forecast(city_id):
     if not city:
         return jsonify({"error": "City not found"}), 404
 
-    city_name = city["name"]
-    cached = _forecast_cache.get(city_name)
+    cached = _forecast_cache.get(city_id)
     if cached and (time.time() - cached[0]) < _FORECAST_TTL:
         return jsonify(cached[1])
 
-    forecast = produce_forecast(city_name)
+    forecast = produce_forecast(city["name"])
     if "error" in forecast:
         return jsonify(forecast), 500
 
-    _forecast_cache[city_name] = (time.time(), forecast)
+    _forecast_cache[city_id] = (time.time(), forecast)
     return jsonify(forecast)
+
+# ---------------------------------------------------------------------------
+# API: Hourly forecast (lightweight, for animated map)
+# ---------------------------------------------------------------------------
+@app.route("/api/hourly/<int:city_id>", methods=["GET"])
+def get_hourly(city_id):
+    city = db.get_city_by_id(city_id)
+    if not city:
+        return jsonify({"error": "City not found"}), 404
+
+    # Use the same cache as full forecast to avoid duplicate API calls
+    cached = _forecast_cache.get(city_id)
+    if cached and (time.time() - cached[0]) < _FORECAST_TTL:
+        forecast = cached[1]
+    else:
+        forecast = produce_forecast(city["name"])
+        if "error" in forecast:
+            return jsonify(forecast), 500
+        _forecast_cache[city_id] = (time.time(), forecast)
+
+    return jsonify({
+        "city_id": city["id"],
+        "name": city["name"],
+        "lat": city["lat"],
+        "lon": city["lon"],
+        "hourly": forecast.get("hourly", []),
+    })
 
 # ---------------------------------------------------------------------------
 # API: Observations (historical)
@@ -554,8 +595,12 @@ def get_alerts():
 def api_invalidate_cache():
     data = request.get_json(silent=True) or {}
     city_name = data.get("city")
-    invalidate_forecast_cache(city_name)
-    return jsonify({"status": "ok", "cleared": city_name or "all"})
+    city_id = data.get("city_id")
+    if city_name and city_id is None:
+        city_obj = db.get_city(city_name)
+        city_id = city_obj["id"] if city_obj else None
+    invalidate_forecast_cache(city_id)
+    return jsonify({"status": "ok", "cleared": city_name or city_id or "all"})
 
 # ---------------------------------------------------------------------------
 # Request logging, rate limiting, security headers

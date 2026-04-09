@@ -19,7 +19,7 @@ import math
 import os
 import sys
 import urllib.request
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 import numpy as np
@@ -91,7 +91,7 @@ def get_observed_monthly_anomaly(lat, lon, year, month, clim_temp, clim_precip=N
         return (temp_anom, precip_anom)
 
     # Don't fetch future data
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     if year > now.year or (year == now.year and month >= now.month):
         return None
 
@@ -182,11 +182,29 @@ def analog_forecast(city_id, lat, lon, target_year, target_month,
     if current_vec is None:
         return _empty_forecast("analog", "Insufficient index data for current period")
 
+    # Season-dependent weight multipliers for index relevance
+    _season_multipliers = {
+        "DJF": {"nao": 1.8, "ao": 1.5, "oni": 1.2, "pna": 1.3, "mjo_amplitude": 1.5},
+        "MAM": {"oni": 1.3, "pdo": 1.2, "mjo_amplitude": 1.3},
+        "JJA": {"oni": 1.2, "amo": 1.3, "mjo_amplitude": 0.8},
+        "SON": {"oni": 1.3, "pdo": 1.2, "mjo_amplitude": 1.2},
+    }
+    if target_month in (12, 1, 2):
+        _season_key = "DJF"
+    elif target_month in (3, 4, 5):
+        _season_key = "MAM"
+    elif target_month in (6, 7, 8):
+        _season_key = "JJA"
+    else:
+        _season_key = "SON"
+    _s_mults = _season_multipliers.get(_season_key, {})
+
     # Build weight vector for distance calculation
     weight_vec = []
     for label in labels:
         idx_name = label.split("_lag")[0]
-        weight_vec.append(index_weights.get(idx_name, 1.0))
+        base_w = index_weights.get(idx_name, 1.0)
+        weight_vec.append(base_w * _s_mults.get(idx_name, 1.0))
     weight_vec = np.array(weight_vec)
     current_vec = np.array(current_vec)
 
@@ -368,6 +386,12 @@ def ridge_regression_forecast(city_id, lat, lon, target_year, target_month,
     y = np.array(y_temp)
     n, p = X.shape
 
+    # Z-score normalize predictors so ridge penalty is equitable across indices
+    X_mean = X.mean(axis=0)
+    X_std = X.std(axis=0)
+    X_std[X_std == 0] = 1.0  # avoid division by zero for constant columns
+    X = (X - X_mean) / X_std
+
     # Ridge regression: beta = (X'X + lambda*I)^(-1) X'y
     XtX = X.T @ X
     Xty = X.T @ y
@@ -383,7 +407,7 @@ def ridge_regression_forecast(city_id, lat, lon, target_year, target_month,
     if current_vec is None:
         return _empty_forecast("regression", "Insufficient current index data")
 
-    x_current = np.array(current_vec)
+    x_current = (np.array(current_vec) - X_mean) / X_std
     temp_forecast = float(x_current @ beta)
 
     # Leave-one-out cross-validation for uncertainty
@@ -675,7 +699,7 @@ def ecmwf_seasonal_forecast(city_id, lat, lon, target_year, target_month,
     base_confidence = max(0.1, min(0.8, 1.0 - spread_ratio * 0.5))
 
     # Lead time penalty: compute months between now and target
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     lead_approx = (target_year - now.year) * 12 + (target_month - now.month)
     lead_approx = max(1, lead_approx)
     lead_penalty = math.exp(-0.15 * lead_approx)
@@ -697,13 +721,15 @@ def ecmwf_seasonal_forecast(city_id, lat, lon, target_year, target_month,
 # ===================================================================
 # 5. BAYESIAN MODEL AVERAGING (BMA)
 # ===================================================================
-def bayesian_model_average(method_forecasts):
+def bayesian_model_average(method_forecasts, city_id=None):
     """Combine multiple method forecasts using BMA.
 
     Args:
         method_forecasts: list of forecast dicts from each method.
             Each must have: temp_anomaly_c, precip_anomaly_pct, confidence,
             spread, tercile_probs.
+        city_id: optional city ID; when provided, historical RPSS/ACC scores
+            from the seasonal_skill table are used to weight methods.
 
     Returns: combined forecast dict.
     """
@@ -717,31 +743,55 @@ def bayesian_model_average(method_forecasts):
         result["method_weights"] = {valid[0]["method"]: 1.0}
         return result
 
-    # Compute weights from confidence and spread
-    # Lower spread + higher confidence = higher weight
-    raw_weights = []
-    for f in valid:
-        spread = max(f.get("spread", 1.0), 0.1)
-        conf = max(f.get("confidence", 0.1), 0.01)
-        # Log-likelihood proxy: -log(spread) + log(conf)
-        w = conf / spread
-        raw_weights.append(w)
+    # Try skill-based weights from historical verification
+    skill_weights = None
+    if city_id is not None:
+        skills = db.get_seasonal_skill(city_id)
+        if skills:
+            skill_raw = []
+            has_scores = False
+            for f in valid:
+                method_skill = skills.get(f["method"], {})
+                rpss = method_skill.get("rpss")
+                acc = method_skill.get("acc")
+                if rpss is not None or acc is not None:
+                    has_scores = True
+                    s = max(0, rpss if rpss is not None else 0) + 0.1
+                    if acc is not None:
+                        s += max(0, acc) * 0.5
+                    skill_raw.append(s)
+                else:
+                    skill_raw.append(0.1)
+            if has_scores:
+                skill_raw = np.array(skill_raw)
+                skill_weights = skill_raw / skill_raw.sum()
 
-    raw_weights = np.array(raw_weights)
-
-    # Cold start fallback: when all methods have equal confidence/spread,
-    # use the configured initial_weights from config.json
-    if np.max(raw_weights) - np.min(raw_weights) < 1e-6:
-        bma_cfg = db.load_config().get("seasonal", {}).get("bma", {})
-        config_weights = bma_cfg.get("initial_weights", [0.30, 0.25, 0.20, 0.25])
-        method_order = bma_cfg.get("methods", ["analog", "regression", "composite", "ecmwf_seas5"])
-        # Map config weights to valid methods by name
-        cfg_weight_map = dict(zip(method_order, config_weights))
-        mapped = [cfg_weight_map.get(f["method"], 1.0 / len(valid)) for f in valid]
-        mapped = np.array(mapped)
-        weights = mapped / mapped.sum()
+    if skill_weights is not None:
+        weights = skill_weights
     else:
-        weights = raw_weights / raw_weights.sum()
+        # Compute weights from confidence and spread
+        # Lower spread + higher confidence = higher weight
+        raw_weights = []
+        for f in valid:
+            spread = max(f.get("spread", 1.0), 0.1)
+            conf = max(f.get("confidence", 0.1), 0.01)
+            w = conf / spread
+            raw_weights.append(w)
+
+        raw_weights = np.array(raw_weights)
+
+        # Cold start fallback: when all methods have equal confidence/spread,
+        # use the configured initial_weights from config.json
+        if np.max(raw_weights) - np.min(raw_weights) < 1e-6:
+            bma_cfg = db.load_config().get("seasonal", {}).get("bma", {})
+            config_weights = bma_cfg.get("initial_weights", [0.30, 0.25, 0.20, 0.25])
+            method_order = bma_cfg.get("methods", ["analog", "regression", "composite", "ecmwf_seas5"])
+            cfg_weight_map = dict(zip(method_order, config_weights))
+            mapped = [cfg_weight_map.get(f["method"], 1.0 / len(valid)) for f in valid]
+            mapped = np.array(mapped)
+            weights = mapped / mapped.sum()
+        else:
+            weights = raw_weights / raw_weights.sum()
 
     # Weighted means
     temp_means = np.array([f["temp_anomaly_c"] for f in valid])
@@ -854,7 +904,7 @@ def run_seasonal_forecast(city_id, lat, lon, target_year, target_month,
             m["confidence"] = round(m["confidence"] * decay_factor, 3)
 
     # BMA combination
-    combined = bayesian_model_average(methods)
+    combined = bayesian_model_average(methods, city_id=city_id)
     combined["lead_months"] = lead_months
     combined["individual_methods"] = methods
 
@@ -1024,7 +1074,7 @@ def run_hindcast_verification(city_id, lat, lon, climatology,
     """
     import logging
     logger = logging.getLogger(__name__)
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     current_year = now.year
     current_month = now.month
 

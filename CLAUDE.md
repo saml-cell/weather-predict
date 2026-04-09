@@ -79,7 +79,7 @@ BACKLOG.md                — Prioritized improvement tasks
 - **Server**: Gunicorn (2 workers) via systemd user service `weather-api`
 - **Telegram Bot**: Interactive bot via `weather-bot` service (polling, responds to /forecast, /alerts, etc.)
 - **Tunnel**: Cloudflare quick tunnel via `weather-tunnel` service (URL changes on restart)
-- **Tailscale IP**: `100.74.222.67:5000` (permanent, works from PC + iPhone)
+- **Tailscale IP**: `<your-tailscale-ip>:5000` (permanent, works from PC + iPhone)
 - **Cron**: 8 weather jobs (fetch every 6h, verify midnight, indices weekly, Telegram alerts)
 - **Auth**: API key via `X-API-Key` header on all POST/DELETE endpoints
 - **Security**: Rate limiting, input sanitization, security headers, path traversal protection
@@ -96,13 +96,13 @@ BACKLOG.md                — Prioritized improvement tasks
 ## Pipeline
 
 ```
-1. Fetch weather from 5 APIs     → Store in weather.db
+1. Fetch weather from 7 APIs     → Store in weather.db
 2. Download NOAA climate indices  → 18+ teleconnection indices
 3. Run 4 ML models + BMA         → Generate seasonal predictions
 4. Compare vs actual observations → Update Bayesian accuracy weights
 5. Check alerts                   → Notify on extreme weather
 6. Cleanup old data               → Prune forecasts >90d, obs >365d
-7. Serve Flask API + dashboard    → http://100.74.222.67:5000
+7. Serve Flask API + dashboard    → http://<your-ip>:5000
 ```
 
 ## Behavioral Rules
@@ -120,7 +120,7 @@ BACKLOG.md                — Prioritized improvement tasks
 ## Running Tests
 
 ```bash
-cd "/home/samko/Weather predict program"
+cd "/path/to/weather-predict"
 python3 -m pytest tests/ -v
 ```
 

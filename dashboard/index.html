@@ -65,11 +65,42 @@
     .mobile-menu.open { display: flex; }
     /* Touch-friendly tap targets */
     @media (max-width: 640px) {
-      button, a { min-height: 44px; }
+      button, a, select { min-height: 44px; }
       .metric-card-grid { grid-template-columns: repeat(2, 1fr) !important; }
+      body { font-size: 16px; -webkit-text-size-adjust: 100%; }
+      p, span, div { -webkit-tap-highlight-color: transparent; }
     }
+    /* Active tap feedback */
+    button:active, a:active, select:active {
+      transform: scale(0.97);
+      transition: transform 0.1s ease;
+    }
+    /* Smooth momentum scrolling */
+    .overflow-x-auto {
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+    .overflow-x-auto::-webkit-scrollbar { display: none; }
     /* Safe area for bottom elements */
     .safe-bottom { padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+    /* Hourly slider thumb styling */
+    input[type="range"]::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 24px; height: 24px; border-radius: 50%;
+      background: #3b82f6; border: 2px solid #1e293b;
+      box-shadow: 0 0 6px rgba(59,130,246,0.5);
+      cursor: pointer;
+    }
+    input[type="range"]::-moz-range-thumb {
+      width: 24px; height: 24px; border-radius: 50%;
+      background: #3b82f6; border: 2px solid #1e293b;
+      box-shadow: 0 0 6px rgba(59,130,246,0.5);
+      cursor: pointer;
+    }
+    @media (min-width: 641px) {
+      input[type="range"]::-webkit-slider-thumb { width: 16px; height: 16px; }
+      input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; }
+    }
   </style>
 </head>
 <body class="bg-slate-900 text-white min-h-screen">
@@ -95,6 +126,7 @@
       getSeasonal: (cityId, months=3) => fetch(`/api/seasonal/${cityId}?months=${months}`).then(r => r.json()),
       getIndices: () => fetch('/api/indices').then(r => r.json()),
       getHealth: () => fetch('/api/health').then(r => r.json()),
+      getHourly: (cityId) => fetch(`/api/hourly/${cityId}`).then(r => r.json()),
     };
 
     // =====================================================================
@@ -107,6 +139,23 @@
     };
 
     const getEmoji = (cond) => conditionEmoji[cond] || conditionEmoji.unknown;
+
+    // Normalize raw condition strings (e.g. "Clear sky") to canonical keys (e.g. "clear")
+    const normalizeCondition = (raw) => {
+      if (!raw) return 'unknown';
+      const l = raw.toLowerCase().trim();
+      if (l.includes('thunderstorm') || l.includes('thunder')) return 'thunderstorm';
+      if (l.includes('heavy rain') || l.includes('torrential') || l.includes('violent rain')) return 'heavy_rain';
+      if (l.includes('snow') || l.includes('blizzard') || l.includes('sleet')) return 'snow';
+      if (l.includes('freezing') || l.includes('ice')) return 'snow';
+      if (l.includes('drizzle') || l.includes('light rain')) return 'drizzle';
+      if (l.includes('rain') || l.includes('shower')) return 'rain';
+      if (l.includes('fog') || l.includes('mist') || l.includes('haze')) return 'fog';
+      if (l.includes('partly cloudy') || l.includes('mainly clear') || l.includes('few clouds') || l.includes('scattered')) return 'partly_cloudy';
+      if (l.includes('overcast') || l.includes('cloudy') || l.includes('broken')) return 'cloudy';
+      if (l.includes('clear') || l.includes('sunny')) return 'clear';
+      return 'unknown';
+    };
 
     // UV Index helpers
     const uvColor = (uv) => {
@@ -327,11 +376,12 @@
       return (
         <div className="min-h-screen">
           {/* Nav */}
-          <nav className="bg-slate-800/80 backdrop-blur-sm border-b border-slate-700 px-4 sm:px-6 py-3 sticky top-0 z-50">
+          <nav className="bg-slate-800/80 backdrop-blur-sm border-b border-slate-700 px-3 sm:px-6 py-2 sm:py-3 sticky top-0 z-50" style={{paddingTop: 'max(0.5rem, env(safe-area-inset-top))'}}>
+
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-3 cursor-pointer" onClick={() => navTo('map')}>
-                <span className="text-2xl">{'\uD83C\uDF24\uFE0F'}</span>
-                <h1 className="text-lg font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
+                <span className="text-xl sm:text-2xl">{'\uD83C\uDF24\uFE0F'}</span>
+                <h1 className="text-base sm:text-lg font-bold bg-gradient-to-r from-blue-400 to-cyan-400 bg-clip-text text-transparent">
                   Weather Predict
                 </h1>
               </div>
@@ -421,7 +471,7 @@
           {/* Pages */}
           <main className="fade-in">
             {page === 'map' && <MapView cities={cities} setCities={setCities} onSelect={openCity} />}
-            {page === 'detail' && selectedCity && <CityDetail city={selectedCity} onTrends={() => openTrends(selectedCity)} onSeasonal={() => openSeasonal(selectedCity)} learnMode={learnMode} />}
+            {page === 'detail' && selectedCity && <CityDetail city={selectedCity} cities={cities} onCitySwitch={openCity} onBack={() => navTo('map')} onTrends={() => openTrends(selectedCity)} onSeasonal={() => openSeasonal(selectedCity)} learnMode={learnMode} onRefresh={loadData} />}
             {page === 'trends' && selectedCity && <TrendsView city={selectedCity} />}
             {page === 'seasonal' && selectedCity && <SeasonalView city={selectedCity} learnMode={learnMode} />}
           </main>
@@ -432,6 +482,31 @@
     // =====================================================================
     // MAP VIEW
     // =====================================================================
+    // =====================================================================
+    // HOURLY MAP HELPERS
+    // =====================================================================
+    const tempToColor = (t) => {
+      if (t == null) return 'rgba(148,163,184,0.7)';
+      if (t <= 0) return 'rgba(59,130,246,0.85)';
+      if (t <= 10) return 'rgba(56,189,248,0.85)';
+      if (t <= 20) return 'rgba(34,197,94,0.85)';
+      if (t <= 30) return 'rgba(250,204,21,0.85)';
+      if (t <= 40) return 'rgba(249,115,22,0.85)';
+      return 'rgba(239,68,68,0.85)';
+    };
+
+    const tempToSize = (t) => {
+      if (t == null) return 14;
+      const clamped = Math.max(-20, Math.min(45, t));
+      return 10 + Math.round(((clamped + 20) / 65) * 18);
+    };
+
+    const windArrowSvg = (deg, speed) => {
+      const size = Math.max(18, Math.min(40, 18 + (speed || 0) * 0.4));
+      const rotation = (deg || 0);
+      return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" style="transform:rotate(${rotation}deg);filter:drop-shadow(0 1px 2px rgba(0,0,0,0.5))"><path d="M12 2L8 14h3v8h2v-8h3L12 2z" fill="rgba(96,165,250,0.9)" stroke="rgba(30,41,59,0.8)" stroke-width="0.5"/></svg>`;
+    };
+
     function MapView({ cities, setCities, onSelect }) {
       const mapRef = useRef(null);
       const mapInstanceRef = useRef(null);
@@ -442,6 +517,21 @@
       const radarLayerRef = useRef(null);
       const [geoLoading, setGeoLoading] = useState(false);
 
+      // Hourly mode state
+      const [hourlyMode, setHourlyMode] = useState(false);
+      const [hourlyData, setHourlyData] = useState({}); // cityId -> {lat, lon, hourly:[]}
+      const [animFrame, setAnimFrame] = useState(0);
+      const [playing, setPlaying] = useState(false);
+      const [overlayLayers, setOverlayLayers] = useState({ rain: false, wind: false, temp: true });
+      const [hourlyPopup, setHourlyPopup] = useState(null); // {city, hourEntry}
+      const [rainFrames, setRainFrames] = useState([]); // [{path, time}]
+      const [rainFrameIdx, setRainFrameIdx] = useState(0);
+      const rainLayerRef = useRef(null);
+      const windMarkersRef = useRef([]);
+      const tempMarkersRef = useRef([]);
+      const playIntervalRef = useRef(null);
+      const maxFrames = useRef(48);
+
       useEffect(() => {
         if (mapInstanceRef.current) return;
         const map = L.map(mapRef.current, { zoomControl: false }).setView([30, 0], 2);
@@ -451,21 +541,21 @@
           maxZoom: 19,
         }).addTo(map);
         mapInstanceRef.current = map;
-        // Fix tile alignment after container is fully rendered
         setTimeout(() => map.invalidateSize(), 100);
       }, []);
 
-      // Re-align tiles whenever the map view becomes visible again
       useEffect(() => {
         if (mapInstanceRef.current) {
           setTimeout(() => mapInstanceRef.current.invalidateSize(), 50);
         }
       });
 
+      // --- Normal city markers (hide when hourly mode has temp/wind overlays) ---
       useEffect(() => {
         if (!mapInstanceRef.current) return;
         const map = mapInstanceRef.current;
-        map.eachLayer(l => { if (l instanceof L.Marker) map.removeLayer(l); });
+        // Remove old normal markers (tagged with _normalMarker)
+        map.eachLayer(l => { if (l._normalMarker) map.removeLayer(l); });
 
         cities.forEach(city => {
           const preview = previews[city.id];
@@ -487,17 +577,26 @@
             iconAnchor: [0, 0],
           });
 
-          L.marker([city.lat, city.lon], { icon })
-            .addTo(map)
-            .on('click', () => onSelect(city));
+          const marker = L.marker([city.lat, city.lon], { icon }).addTo(map);
+          marker._normalMarker = true;
+          marker.on('click', () => {
+            if (hourlyMode) {
+              const hd = hourlyData[city.id];
+              if (hd?.hourly?.[animFrame]) {
+                setHourlyPopup({ city, hourEntry: hd.hourly[animFrame] });
+              }
+            } else {
+              onSelect(city);
+            }
+          });
         });
-      }, [cities, previews, onSelect]);
+      }, [cities, previews, onSelect, hourlyMode, hourlyData, animFrame]);
 
-      // Radar overlay toggle
+      // Radar overlay toggle (non-hourly simple mode)
       useEffect(() => {
         const map = mapInstanceRef.current;
         if (!map) return;
-        if (radarOn) {
+        if (radarOn && !hourlyMode) {
           fetch('https://api.rainviewer.com/public/weather-maps.json')
             .then(r => r.json())
             .then(data => {
@@ -510,13 +609,13 @@
                 { opacity: 0.6, zIndex: 400 }
               ).addTo(map);
             }).catch(() => {});
-        } else {
+        } else if (!hourlyMode) {
           if (radarLayerRef.current) {
             map.removeLayer(radarLayerRef.current);
             radarLayerRef.current = null;
           }
         }
-      }, [radarOn]);
+      }, [radarOn, hourlyMode]);
 
       // Load previews for all cities
       useEffect(() => {
@@ -528,6 +627,160 @@
           }
         });
       }, [cities]);
+
+      // --- Fetch hourly data when hourly mode is activated ---
+      useEffect(() => {
+        if (!hourlyMode) return;
+        cities.forEach(city => {
+          if (!hourlyData[city.id]) {
+            api.getHourly(city.id).then(data => {
+              if (!data.error && data.hourly) {
+                setHourlyData(prev => ({ ...prev, [city.id]: data }));
+                if (data.hourly.length > 0) {
+                  maxFrames.current = Math.max(maxFrames.current, data.hourly.length);
+                }
+              }
+            }).catch(() => {});
+          }
+        });
+      }, [hourlyMode, cities]);
+
+      // --- Fetch RainViewer frames for animated rain overlay ---
+      useEffect(() => {
+        if (!hourlyMode || !overlayLayers.rain) {
+          // Clean up rain layer
+          if (rainLayerRef.current && mapInstanceRef.current) {
+            mapInstanceRef.current.removeLayer(rainLayerRef.current);
+            rainLayerRef.current = null;
+          }
+          setRainFrames([]);
+          return;
+        }
+        fetch('https://api.rainviewer.com/public/weather-maps.json')
+          .then(r => r.json())
+          .then(data => {
+            const past = data?.radar?.past || [];
+            const nowcast = data?.radar?.nowcast || [];
+            const allFrames = [...past, ...nowcast].map(f => ({ path: f.path, time: f.time }));
+            setRainFrames(allFrames);
+            if (allFrames.length > 0) setRainFrameIdx(0);
+          }).catch(() => {});
+      }, [hourlyMode, overlayLayers.rain]);
+
+      // --- Animate rain frames synced to animFrame ---
+      useEffect(() => {
+        const map = mapInstanceRef.current;
+        if (!map || !hourlyMode || !overlayLayers.rain || rainFrames.length === 0) return;
+        // Map animFrame to rainFrame index proportionally
+        const idx = Math.min(Math.floor((animFrame / Math.max(maxFrames.current, 1)) * rainFrames.length), rainFrames.length - 1);
+        const frame = rainFrames[idx];
+        if (!frame) return;
+        if (rainLayerRef.current) map.removeLayer(rainLayerRef.current);
+        rainLayerRef.current = L.tileLayer(
+          `https://tilecache.rainviewer.com${frame.path}/256/{z}/{x}/{y}/2/1_1.png`,
+          { opacity: 0.5, zIndex: 400 }
+        ).addTo(map);
+      }, [animFrame, rainFrames, hourlyMode, overlayLayers.rain]);
+
+      // --- Wind arrow markers ---
+      useEffect(() => {
+        const map = mapInstanceRef.current;
+        if (!map) return;
+        // Remove old wind markers
+        windMarkersRef.current.forEach(m => map.removeLayer(m));
+        windMarkersRef.current = [];
+        if (!hourlyMode || !overlayLayers.wind) return;
+
+        cities.forEach(city => {
+          const hd = hourlyData[city.id];
+          const entry = hd?.hourly?.[animFrame];
+          if (!entry) return;
+          const icon = L.divIcon({
+            className: '',
+            html: `<div style="display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-50%)">
+              ${windArrowSvg(entry.wind_dir, entry.wind_kmh)}
+              <div style="font-size:10px;color:#93c5fd;text-shadow:0 1px 2px rgba(0,0,0,0.8);margin-top:1px;white-space:nowrap">${Math.round(entry.wind_kmh || 0)} km/h</div>
+            </div>`,
+            iconSize: [0, 0],
+            iconAnchor: [0, 0],
+          });
+          const m = L.marker([city.lat + 0.15, city.lon + 0.15], { icon, interactive: false, zIndexOffset: 500 }).addTo(map);
+          windMarkersRef.current.push(m);
+        });
+      }, [animFrame, hourlyMode, overlayLayers.wind, hourlyData, cities]);
+
+      // --- Temperature dot markers ---
+      useEffect(() => {
+        const map = mapInstanceRef.current;
+        if (!map) return;
+        tempMarkersRef.current.forEach(m => map.removeLayer(m));
+        tempMarkersRef.current = [];
+        if (!hourlyMode || !overlayLayers.temp) return;
+
+        cities.forEach(city => {
+          const hd = hourlyData[city.id];
+          const entry = hd?.hourly?.[animFrame];
+          if (!entry) return;
+          const color = tempToColor(entry.temp_c);
+          const size = tempToSize(entry.temp_c);
+          const icon = L.divIcon({
+            className: '',
+            html: `<div style="display:flex;flex-direction:column;align-items:center;transform:translate(-50%,-50%)">
+              <div style="width:${size}px;height:${size}px;border-radius:50%;background:${color};border:2px solid rgba(255,255,255,0.3);box-shadow:0 0 ${size/2}px ${color}"></div>
+              <div style="font-size:11px;font-weight:700;color:white;text-shadow:0 1px 3px rgba(0,0,0,0.9);margin-top:2px;white-space:nowrap">${entry.temp_c != null ? Math.round(entry.temp_c) + '\u00B0' : '--'}</div>
+            </div>`,
+            iconSize: [0, 0],
+            iconAnchor: [0, 0],
+          });
+          const m = L.marker([city.lat - 0.15, city.lon - 0.15], { icon, interactive: false, zIndexOffset: 500 }).addTo(map);
+          tempMarkersRef.current.push(m);
+        });
+      }, [animFrame, hourlyMode, overlayLayers.temp, hourlyData, cities]);
+
+      // --- Play/pause animation ---
+      useEffect(() => {
+        if (playing && hourlyMode) {
+          playIntervalRef.current = setInterval(() => {
+            setAnimFrame(prev => (prev + 1) % maxFrames.current);
+          }, 500);
+        } else {
+          if (playIntervalRef.current) clearInterval(playIntervalRef.current);
+        }
+        return () => { if (playIntervalRef.current) clearInterval(playIntervalRef.current); };
+      }, [playing, hourlyMode]);
+
+      // --- Cleanup on hourly mode off ---
+      useEffect(() => {
+        if (!hourlyMode) {
+          setPlaying(false);
+          setAnimFrame(0);
+          setHourlyPopup(null);
+          const map = mapInstanceRef.current;
+          if (map) {
+            windMarkersRef.current.forEach(m => map.removeLayer(m));
+            windMarkersRef.current = [];
+            tempMarkersRef.current.forEach(m => map.removeLayer(m));
+            tempMarkersRef.current = [];
+            if (rainLayerRef.current) { map.removeLayer(rainLayerRef.current); rainLayerRef.current = null; }
+          }
+        }
+      }, [hourlyMode]);
+
+      const toggleOverlay = (key) => {
+        setOverlayLayers(prev => ({ ...prev, [key]: !prev[key] }));
+      };
+
+      // Compute current time label from first city's hourly data
+      const getCurrentTimeLabel = () => {
+        for (const cid of Object.keys(hourlyData)) {
+          const entry = hourlyData[cid]?.hourly?.[animFrame];
+          if (entry?.hour) {
+            const d = new Date(entry.hour);
+            return d.toLocaleString(undefined, { weekday: 'short', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+          }
+        }
+        return `Hour ${animFrame}`;
+      };
 
       const handleGeolocate = async () => {
         if (!navigator.geolocation) return;
@@ -588,7 +841,7 @@
                   {adding ? '...' : '+ Add'}
                 </button>
               </div>
-              <div className="flex gap-2">
+              <div className="flex gap-2 flex-wrap">
                 <button type="button" onClick={handleGeolocate} disabled={geoLoading}
                   className="bg-slate-700/90 hover:bg-slate-600 disabled:bg-slate-600 backdrop-blur-sm border border-slate-600 px-3 py-2.5 rounded-lg text-sm font-medium transition flex items-center gap-1.5"
                   title="Use my location">
@@ -598,27 +851,150 @@
                     <>{'\uD83D\uDCCD'}<span className="hidden sm:inline"> My Location</span></>
                   )}
                 </button>
-                {/* Radar toggle — inline on mobile */}
-                <button type="button" onClick={() => setRadarOn(!radarOn)}
+                {/* Radar toggle */}
+                <button type="button" onClick={() => { setRadarOn(!radarOn); if (hourlyMode) setHourlyMode(false); }}
                   className={`backdrop-blur-sm border px-3 py-2.5 rounded-lg text-sm font-medium transition flex items-center gap-1.5 ${
-                    radarOn
+                    radarOn && !hourlyMode
                       ? 'bg-cyan-600/90 border-cyan-500 text-white'
                       : 'bg-slate-800/90 border-slate-600 text-slate-300 hover:bg-slate-700'
                   }`}>
-                  {'\uD83C\uDF27\uFE0F'}<span className="hidden sm:inline"> Radar {radarOn ? 'ON' : 'OFF'}</span>
+                  {'\uD83C\uDF27\uFE0F'}<span className="hidden sm:inline"> Radar</span>
+                </button>
+                {/* Hourly toggle */}
+                <button type="button" onClick={() => { setHourlyMode(!hourlyMode); if (!hourlyMode) setRadarOn(false); }}
+                  className={`backdrop-blur-sm border px-3 py-2.5 rounded-lg text-sm font-medium transition flex items-center gap-1.5 ${
+                    hourlyMode
+                      ? 'bg-purple-600/90 border-purple-500 text-white'
+                      : 'bg-slate-800/90 border-slate-600 text-slate-300 hover:bg-slate-700'
+                  }`}>
+                  {'\u23F0'}<span className="hidden sm:inline"> Hourly</span>
                 </button>
               </div>
             </form>
           </div>
 
+          {/* Hourly layer toggle buttons — top right */}
+          {hourlyMode && (
+            <div className="absolute top-3 right-3 z-[1000] flex flex-col gap-1.5">
+              {[
+                { key: 'temp', label: 'Temp', icon: '\uD83C\uDF21\uFE0F', color: 'orange' },
+                { key: 'wind', label: 'Wind', icon: '\uD83D\uDCA8', color: 'blue' },
+                { key: 'rain', label: 'Rain', icon: '\uD83C\uDF27\uFE0F', color: 'cyan' },
+              ].map(layer => (
+                <button key={layer.key} type="button" onClick={() => toggleOverlay(layer.key)}
+                  className={`backdrop-blur-sm border px-3 py-2.5 sm:px-2.5 sm:py-1.5 rounded-lg text-sm sm:text-xs font-medium transition flex items-center gap-1.5 sm:gap-1 min-h-[44px] sm:min-h-0 ${
+                    overlayLayers[layer.key]
+                      ? `bg-${layer.color}-600/80 border-${layer.color}-500 text-white`
+                      : 'bg-slate-800/90 border-slate-600 text-slate-400 hover:bg-slate-700'
+                  }`}
+                  style={overlayLayers[layer.key] ? {
+                    backgroundColor: layer.color === 'orange' ? 'rgba(234,88,12,0.8)' : layer.color === 'blue' ? 'rgba(37,99,235,0.8)' : 'rgba(8,145,178,0.8)',
+                    borderColor: layer.color === 'orange' ? '#f97316' : layer.color === 'blue' ? '#3b82f6' : '#06b6d4',
+                  } : {}}>
+                  {layer.icon} {layer.label}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Hourly time slider at bottom */}
+          {hourlyMode && (
+            <div className="absolute bottom-20 sm:bottom-24 left-3 right-3 z-[1000]">
+              <div className="bg-slate-800/95 backdrop-blur-sm border border-slate-600 rounded-xl px-4 py-3 shadow-xl">
+                <div className="flex items-center gap-3 mb-2">
+                  <button type="button" onClick={() => setPlaying(!playing)}
+                    className="bg-slate-700 hover:bg-slate-600 active:bg-slate-500 border border-slate-500 rounded-lg w-11 h-11 sm:w-9 sm:h-9 flex items-center justify-center text-base sm:text-sm transition flex-shrink-0">
+                    {playing ? '\u23F8\uFE0F' : '\u25B6\uFE0F'}
+                  </button>
+                  <div className="flex-1 text-center text-sm font-medium text-slate-200 truncate">
+                    {getCurrentTimeLabel()}
+                  </div>
+                  <div className="text-xs text-slate-400 flex-shrink-0">
+                    {animFrame + 1}/{maxFrames.current}
+                  </div>
+                </div>
+                <input type="range" min="0" max={maxFrames.current - 1} value={animFrame}
+                  onChange={e => { setAnimFrame(parseInt(e.target.value)); setPlaying(false); }}
+                  className="w-full h-2 rounded-full appearance-none cursor-pointer"
+                  style={{
+                    background: `linear-gradient(to right, #3b82f6 ${(animFrame / Math.max(maxFrames.current - 1, 1)) * 100}%, #334155 ${(animFrame / Math.max(maxFrames.current - 1, 1)) * 100}%)`,
+                  }} />
+              </div>
+            </div>
+          )}
+
+          {/* Hourly detail popup */}
+          {hourlyPopup && hourlyMode && (
+            <div className="absolute top-16 left-1/2 -translate-x-1/2 z-[1100] w-72 sm:w-80">
+              <div className="bg-slate-800/95 backdrop-blur-sm border border-slate-600 rounded-xl p-4 shadow-2xl">
+                <div className="flex items-center justify-between mb-3">
+                  <div className="font-semibold text-sm">{hourlyPopup.city.name}</div>
+                  <button onClick={() => setHourlyPopup(null)}
+                    className="text-slate-400 hover:text-white text-lg leading-none w-6 h-6 flex items-center justify-center">{'\u00D7'}</button>
+                </div>
+                {(() => {
+                  const e = hourlyPopup.hourEntry;
+                  const timeStr = e.hour ? new Date(e.hour).toLocaleString(undefined, { weekday: 'short', hour: '2-digit', minute: '2-digit' }) : '--';
+                  const condEmoji = e.condition ? getEmoji(normalizeCondition(e.condition)) : '\u2753';
+                  return (
+                    <div className="space-y-2 text-xs">
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">Time</span>
+                        <span className="font-medium">{timeStr}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">Condition</span>
+                        <span className="font-medium">{condEmoji} {e.condition || '--'}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">Temperature</span>
+                        <span className="font-medium">{e.temp_c != null ? `${e.temp_c}\u00B0C` : '--'}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">Feels Like</span>
+                        <span className="font-medium">{e.feels_like != null ? `${e.feels_like}\u00B0C` : '--'}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">Cloud Cover</span>
+                        <span className="font-medium">{e.cloud_cover != null ? `${e.cloud_cover}%` : '--'}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">Precipitation</span>
+                        <span className="font-medium">{e.precip_mm != null ? `${e.precip_mm} mm` : '--'}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">Wind</span>
+                        <span className="font-medium flex items-center gap-1">
+                          {e.wind_kmh != null ? `${e.wind_kmh} km/h` : '--'}
+                          {e.wind_dir != null && (
+                            <span style={{display:'inline-block',transform:`rotate(${e.wind_dir}deg)`,fontSize:'14px'}}>{'\u2191'}</span>
+                          )}
+                          {e.wind_dir != null && <span className="text-slate-400">{degToCompass(e.wind_dir)}</span>}
+                        </span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">Humidity</span>
+                        <span className="font-medium">{e.humidity != null ? `${e.humidity}%` : '--'}</span>
+                      </div>
+                      <div className="flex justify-between items-center">
+                        <span className="text-slate-400">UV Index</span>
+                        <span className="font-medium">{e.uv_index != null ? e.uv_index : '--'}</span>
+                      </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
+          )}
+
           {/* City cards at bottom — safe area for iPhone */}
-          <div className="absolute bottom-0 left-0 right-0 z-[1000] safe-bottom px-3 pt-2">
+          <div className={`absolute bottom-0 left-0 right-0 z-[1000] safe-bottom px-3 pt-2 ${hourlyMode ? 'pointer-events-none opacity-0 sm:pointer-events-auto sm:opacity-100' : ''}`}>
             <div className="flex gap-2 sm:gap-3 overflow-x-auto pb-2 snap-x snap-mandatory">
               {cities.map(city => {
                 const p = previews[city.id];
                 return (
                   <div key={city.id} onClick={() => onSelect(city)}
-                    className="bg-slate-800/90 backdrop-blur-sm border border-slate-700 rounded-xl p-3 sm:p-4 min-w-[160px] sm:min-w-[200px] cursor-pointer hover:border-blue-500/50 active:border-blue-500 transition flex-shrink-0 snap-start">
+                    className="bg-slate-800/90 backdrop-blur-sm border border-slate-700 rounded-xl p-4 sm:p-4 min-w-[180px] sm:min-w-[200px] cursor-pointer hover:border-blue-500/50 active:border-blue-500 active:bg-slate-700/90 transition flex-shrink-0 snap-start">
                     <div className="flex items-center justify-between mb-1">
                       <span className="font-semibold text-sm">{city.name}</span>
                       {p && <span className={`text-[10px] sm:text-xs px-1.5 sm:px-2 py-0.5 rounded-full border ${confidenceBg[p.current.confidence]}`}>
@@ -649,7 +1025,7 @@
     // =====================================================================
     // CITY DETAIL VIEW
     // =====================================================================
-    function CityDetail({ city, onTrends, onSeasonal, learnMode }) {
+    function CityDetail({ city, cities, onCitySwitch, onBack, onTrends, onSeasonal, learnMode, onRefresh }) {
       const [forecast, setForecast] = useState(null);
       const [accuracy, setAccuracy] = useState(null);
       const [compare, setCompare] = useState(null);
@@ -698,18 +1074,59 @@
       return (
         <div className="max-w-7xl mx-auto p-4 sm:p-6 space-y-4 sm:space-y-6 fade-in">
           {/* Header */}
-          <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
-            <div>
-              <h2 className="text-2xl sm:text-3xl font-bold">{forecast.location.name}</h2>
-              <p className="text-slate-400 text-sm">{forecast.location.country} &middot; {forecast.sources_used.length} sources</p>
+          <div className="space-y-3">
+            {/* Back button + City switcher row */}
+            <div className="flex items-center gap-2 flex-wrap">
+              <button onClick={onBack}
+                className="bg-slate-700 hover:bg-slate-600 active:bg-slate-500 active:scale-95 px-4 py-2.5 rounded-lg text-sm font-medium transition flex items-center gap-1.5 min-h-[44px]">
+                {'\u2190'} Map
+              </button>
+              {cities && cities.length > 1 && (
+                <select
+                  value={city.id}
+                  onChange={(e) => {
+                    const c = cities.find(c => c.id === parseInt(e.target.value));
+                    if (c) onCitySwitch(c);
+                  }}
+                  className="bg-slate-700 border border-slate-600 text-white rounded-lg px-3 py-2.5 text-sm font-medium min-h-[44px] focus:outline-none focus:border-blue-500 appearance-none cursor-pointer"
+                  style={{backgroundImage: "url(\"data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%2394a3b8' d='M6 8L1 3h10z'/%3E%3C/svg%3E\")", backgroundRepeat: 'no-repeat', backgroundPosition: 'right 10px center', paddingRight: '30px'}}>
+                  {cities.map(c => (
+                    <option key={c.id} value={c.id}>{c.name}</option>
+                  ))}
+                </select>
+              )}
+              <button onClick={retryLoad} title="Refresh data"
+                className="bg-slate-700 hover:bg-slate-600 active:bg-slate-500 active:scale-95 px-3 py-2.5 rounded-lg text-sm transition min-h-[44px] ml-auto">
+                {'\uD83D\uDD04'}
+              </button>
             </div>
-            <div className="flex gap-2">
-              <button onClick={onTrends} className="bg-slate-700 hover:bg-slate-600 active:bg-slate-500 px-4 py-2.5 rounded-lg text-sm transition flex-1 sm:flex-none">
-                {'\uD83D\uDCC8'} Trends
-              </button>
-              <button onClick={onSeasonal} className="bg-purple-700 hover:bg-purple-600 active:bg-purple-500 px-4 py-2.5 rounded-lg text-sm transition flex-1 sm:flex-none">
-                {'\uD83C\uDF0D'} Seasonal
-              </button>
+            <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
+              <div>
+                <h2 className="text-2xl sm:text-3xl font-bold">{forecast.location.name}</h2>
+                <div className="flex items-center gap-2 mt-1">
+                  <p className="text-slate-400 text-sm">{forecast.location.country}</p>
+                  <span className="text-slate-600">&middot;</span>
+                  {(() => {
+                    const used = forecast.sources_used?.length || 0;
+                    const total = 7;
+                    const dotColor = used >= 5 ? 'bg-emerald-400' : used >= 3 ? 'bg-yellow-400' : 'bg-red-400';
+                    return (
+                      <span className="flex items-center gap-1.5 text-sm">
+                        <span className={`inline-block w-2 h-2 rounded-full ${dotColor}`}></span>
+                        <span className="text-slate-400">{used}/{total} sources active</span>
+                      </span>
+                    );
+                  })()}
+                </div>
+              </div>
+              <div className="flex gap-2">
+                <button onClick={onTrends} className="bg-slate-700 hover:bg-slate-600 active:bg-slate-500 active:scale-95 px-4 py-2.5 rounded-lg text-sm transition flex-1 sm:flex-none min-h-[44px]">
+                  {'\uD83D\uDCC8'} Trends
+                </button>
+                <button onClick={onSeasonal} className="bg-purple-700 hover:bg-purple-600 active:bg-purple-500 active:scale-95 px-4 py-2.5 rounded-lg text-sm transition flex-1 sm:flex-none min-h-[44px]">
+                  {'\uD83C\uDF0D'} Seasonal
+                </button>
+              </div>
             </div>
           </div>
 
@@ -778,12 +1195,48 @@
             </div>
           )}
 
-          {/* 7-day forecast */}
+          {/* 7-day forecast — card layout on mobile, table on desktop */}
           <div className="bg-slate-800 rounded-xl border border-slate-700 overflow-hidden">
-            <div className="px-5 py-3 border-b border-slate-700">
-              <h3 className="font-semibold">7-Day Weighted Forecast</h3>
+            <div className="px-4 sm:px-5 py-3 border-b border-slate-700">
+              <h3 className="font-semibold text-sm sm:text-base">7-Day Weighted Forecast</h3>
             </div>
-            <div className="overflow-x-auto">
+            {/* Mobile: card layout */}
+            <div className="sm:hidden p-3 space-y-2">
+              {forecast.daily.map((day, i) => (
+                <div key={day.date} className={`rounded-lg p-3 border ${i === 0 ? 'bg-blue-500/10 border-blue-500/30' : 'bg-slate-700/30 border-slate-700/50'}`}>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="font-medium text-sm">
+                      {new Date(day.date + 'T00:00').toLocaleDateString('en-US', { weekday: 'short', month: 'short', day: 'numeric' })}
+                    </span>
+                    <span className="text-xl">{getEmoji(day.weighted_condition)}</span>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    <div>
+                      <span className="text-slate-500 block">High</span>
+                      <span className="font-bold text-orange-400 text-sm">{day.weighted_high_c != null ? `${day.weighted_high_c}\u00B0` : '-'}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block">Low</span>
+                      <span className="font-bold text-blue-400 text-sm">{day.weighted_low_c != null ? `${day.weighted_low_c}\u00B0` : '-'}</span>
+                    </div>
+                    <div>
+                      <span className="text-slate-500 block">Rain</span>
+                      <span className={`font-bold text-sm ${day.adjusted_precip_prob !== day.weighted_precip_prob ? 'text-yellow-400' : ''}`}>
+                        {day.adjusted_precip_prob != null ? `${Math.round(day.adjusted_precip_prob)}%` : '-'}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="flex items-center justify-between mt-2 text-xs text-slate-400">
+                    <span>{'\uD83D\uDCA8'} {day.weighted_wind_kmh != null ? `${day.weighted_wind_kmh} km/h` : '-'}{day.wind_dir_deg != null ? ` ${degToCompass(day.wind_dir_deg)}` : ''}</span>
+                    {day.physics_corrections?.length > 0 && (
+                      <span className="text-yellow-400/70 truncate ml-2 max-w-[50%]">{'\u2699\uFE0F'} {day.physics_corrections.length} adj.</span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {/* Desktop: table layout */}
+            <div className="hidden sm:block overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="text-slate-400 text-xs uppercase">
@@ -812,7 +1265,7 @@
                       </td>
                       <td className="px-3 py-3 text-right">
                         {day.weighted_wind_kmh != null ? day.weighted_wind_kmh : '-'}
-                        {day.wind_direction_deg != null && <span className="text-slate-400 ml-1 text-xs">{degToCompass(day.wind_direction_deg)}</span>}
+                        {day.wind_dir_deg != null && <span className="text-slate-400 ml-1 text-xs">{degToCompass(day.wind_dir_deg)}</span>}
                       </td>
                       <td className="px-5 py-3 text-xs text-slate-400 max-w-xs truncate">
                         {day.physics_corrections?.length > 0 ? day.physics_corrections.join('; ') : '-'}
@@ -830,22 +1283,22 @@
               <div className="px-5 py-3 border-b border-slate-700">
                 <h3 className="font-semibold">Hourly Forecast (Next 24h)</h3>
               </div>
-              <div className="overflow-x-auto p-4">
-                <div className="flex gap-3" style={{minWidth: 'max-content'}}>
+              <div className="overflow-x-auto p-3 sm:p-4" style={{WebkitOverflowScrolling: 'touch', scrollSnapType: 'x mandatory'}}>
+                <div className="flex gap-2.5 sm:gap-3" style={{minWidth: 'max-content'}}>
                   {forecast.hourly.slice(0, 24).map((hr, i) => (
-                    <div key={i} className="flex-shrink-0 w-24 bg-slate-700/50 rounded-lg p-3 text-center border border-slate-600/50">
+                    <div key={i} className="flex-shrink-0 w-[88px] sm:w-24 bg-slate-700/50 rounded-lg p-2.5 sm:p-3 text-center border border-slate-600/50" style={{scrollSnapAlign: 'start'}}>
                       <div className="text-xs text-slate-400 font-medium mb-1">
-                        {hr.time ? hr.time.slice(11, 16) : `${String(i).padStart(2, '0')}:00`}
+                        {hr.hour ? hr.hour.slice(11, 16) : `${String(i).padStart(2, '0')}:00`}
                       </div>
                       <div className="text-lg mb-1">{getEmoji(hr.condition || hr.weather)}</div>
                       <div className="text-sm font-bold">{hr.temp_c != null ? `${hr.temp_c}\u00B0` : '-'}</div>
                       {hr.precip_prob != null && (
                         <div className="text-xs text-cyan-400 mt-1">{'\uD83D\uDCA7'} {Math.round(hr.precip_prob)}%</div>
                       )}
-                      {hr.wind_speed_kmh != null && (
+                      {hr.wind_kmh != null && (
                         <div className="text-xs text-slate-400 mt-0.5">
-                          {hr.wind_speed_kmh} km/h
-                          {hr.wind_direction_deg != null && <span className="ml-0.5">{degToCompass(hr.wind_direction_deg)}</span>}
+                          {hr.wind_kmh} km/h
+                          {hr.wind_dir != null && <span className="ml-0.5">{degToCompass(hr.wind_dir)}</span>}
                         </div>
                       )}
                       {hr.uv_index != null && (
@@ -870,6 +1323,19 @@
 
           {/* Physics corrections detail */}
           <PhysicsLog forecast={forecast} />
+
+          {/* Attribution footer */}
+          <footer className="pt-6 pb-4 text-center space-y-1" style={{paddingBottom: 'max(1rem, env(safe-area-inset-bottom))'}}>
+            <div className="text-xs text-slate-500 leading-relaxed">
+              Weather data provided by <a href="https://openweathermap.org" target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-white underline underline-offset-2">OpenWeather</a>
+              {' \u00B7 '}Powered by <a href="https://www.weatherapi.com" target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-white underline underline-offset-2">WeatherAPI.com</a>
+              {' \u00B7 '}Forecast data from <a href="https://www.visualcrossing.com" target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-white underline underline-offset-2">Visual Crossing</a>
+            </div>
+            <div className="text-xs text-slate-500 leading-relaxed">
+              NOAA National Weather Service
+              {' \u00B7 '}ECMWF via <a href="https://open-meteo.com" target="_blank" rel="noopener noreferrer" className="text-slate-400 hover:text-white underline underline-offset-2">Open-Meteo</a>
+            </div>
+          </footer>
         </div>
       );
     }
@@ -1186,7 +1652,7 @@
 
       useEffect(() => {
         if (chartRef.current) chartRef.current.destroy();
-        const colors = { 'Open-Meteo': '#3b82f6', 'wttr.in': '#10b981', 'OpenWeatherMap': '#f59e0b', 'WeatherAPI': '#ef4444' };
+        const colors = { 'Open-Meteo': '#3b82f6', 'wttr.in': '#10b981', 'OpenWeatherMap': '#f59e0b', 'WeatherAPI': '#ef4444', 'NOAA_NWS': '#06b6d4', 'VisualCrossing': '#a855f7', 'ECMWF': '#f97316' };
 
         const datasets = Object.entries(sourceErrors).map(([source, errors]) => ({
           label: source,

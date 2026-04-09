@@ -81,6 +81,39 @@ def fetch_observation(lat, lon, date_str, tz="auto"):
 
 
 # ---------------------------------------------------------------------------
+# Graduated condition similarity
+# ---------------------------------------------------------------------------
+_CONDITION_ADJACENCY = {
+    # normalize_condition() outputs: clear, partly_cloudy, cloudy, rain,
+    # heavy_rain, drizzle, snow, thunderstorm, fog, unknown
+    frozenset({"clear", "partly_cloudy"}): 0.5,
+    frozenset({"partly_cloudy", "cloudy"}): 0.5,
+    frozenset({"cloudy", "fog"}): 0.3,
+    frozenset({"cloudy", "drizzle"}): 0.3,
+    frozenset({"cloudy", "rain"}): 0.2,
+    frozenset({"partly_cloudy", "drizzle"}): 0.2,
+    frozenset({"drizzle", "rain"}): 0.5,
+    frozenset({"rain", "heavy_rain"}): 0.5,
+    frozenset({"rain", "thunderstorm"}): 0.3,
+    frozenset({"heavy_rain", "thunderstorm"}): 0.4,
+    frozenset({"rain", "snow"}): 0.2,
+    frozenset({"drizzle", "fog"}): 0.3,
+    frozenset({"snow", "rain"}): 0.2,
+}
+
+
+def _condition_similarity(cond_a, cond_b):
+    """Return similarity score between two weather conditions.
+
+    1.0 = exact match, 0.5 = adjacent, 0.0 = unrelated/opposite.
+    """
+    if cond_a == cond_b:
+        return 1.0
+    pair = frozenset({cond_a, cond_b})
+    return _CONDITION_ADJACENCY.get(pair, 0.0)
+
+
+# ---------------------------------------------------------------------------
 # Score forecasts against observations
 # ---------------------------------------------------------------------------
 def score_forecasts_for_date(city_id, target_date):
@@ -145,9 +178,9 @@ def score_forecasts_for_date(city_id, target_date):
         else:
             error["lead_days"] = None
 
-        # Condition match
+        # Condition match (graduated similarity)
         if fc["condition_text"] and obs["condition_text"]:
-            error["condition_match"] = 1.0 if fc["condition_text"] == obs["condition_text"] else 0.0
+            error["condition_match"] = _condition_similarity(fc["condition_text"], obs["condition_text"])
         else:
             error["condition_match"] = None
 
@@ -234,7 +267,8 @@ def recompute_weights(city_id, window_days=None):
     # Also track bias sums and per-lead-time-group stats
     def _empty_bucket():
         return {"weighted_sum": 0.0, "weight_sum": 0.0, "count": 0,
-                "bias_sum": 0.0, "bias_count": 0}
+                "bias_sum": 0.0, "bias_count": 0,
+                "sq_error_sum": 0.0, "sq_error_count": 0}
 
     source_metrics = {}  # {source: {metric: bucket}}
     # {source: {metric: {ltg: bucket}}}
@@ -272,6 +306,11 @@ def recompute_weights(city_id, window_days=None):
                 sm["weight_sum"] += decay_weight
                 sm["count"] += 1
 
+                # Track squared errors for RMSE (using raw error, not decay-weighted)
+                if metric != "condition":
+                    sm["sq_error_sum"] += value ** 2
+                    sm["sq_error_count"] += 1
+
                 # Track signed bias
                 bias_key = metric_to_bias_key.get(metric)
                 if bias_key:
@@ -285,6 +324,9 @@ def recompute_weights(city_id, window_days=None):
                 lt_sm["weighted_sum"] += value * decay_weight
                 lt_sm["weight_sum"] += decay_weight
                 lt_sm["count"] += 1
+                if metric != "condition":
+                    lt_sm["sq_error_sum"] += value ** 2
+                    lt_sm["sq_error_count"] += 1
                 if bias_key:
                     bias_val = err.get(bias_key)
                     if bias_val is not None:
@@ -360,6 +402,8 @@ def recompute_weights(city_id, window_days=None):
         conn.execute("ALTER TABLE source_accuracy ADD COLUMN bias REAL DEFAULT NULL")
     if "lead_time_group" not in existing_cols:
         conn.execute("ALTER TABLE source_accuracy ADD COLUMN lead_time_group TEXT DEFAULT NULL")
+    if "rmse" not in existing_cols:
+        conn.execute("ALTER TABLE source_accuracy ADD COLUMN rmse REAL DEFAULT NULL")
     conn.commit()
 
     # Store weights in database (overall)
@@ -369,6 +413,7 @@ def recompute_weights(city_id, window_days=None):
             mae = None
             accuracy_pct = None
             bias = None
+            rmse = None
 
             if sm["count"] > 0 and sm["weight_sum"] > 0:
                 weighted_value = sm["weighted_sum"] / sm["weight_sum"]
@@ -376,6 +421,9 @@ def recompute_weights(city_id, window_days=None):
                     accuracy_pct = round(weighted_value * 100, 1)
                 else:
                     mae = round(weighted_value, 3)
+
+            if sm["sq_error_count"] > 0:
+                rmse = round(math.sqrt(sm["sq_error_sum"] / sm["sq_error_count"]), 3)
 
             if sm["bias_count"] > 0:
                 bias = round(sm["bias_sum"] / sm["bias_count"], 3)
@@ -390,6 +438,7 @@ def recompute_weights(city_id, window_days=None):
                 sample_count=sm["count"],
                 window_days=window_days,
                 bias=bias,
+                rmse=rmse,
             )
 
     # Store per-lead-time-group accuracy
@@ -403,6 +452,7 @@ def recompute_weights(city_id, window_days=None):
                 mae = None
                 accuracy_pct = None
                 bias = None
+                rmse = None
 
                 if lt_sm["weight_sum"] > 0:
                     weighted_value = lt_sm["weighted_sum"] / lt_sm["weight_sum"]
@@ -410,6 +460,9 @@ def recompute_weights(city_id, window_days=None):
                         accuracy_pct = round(weighted_value * 100, 1)
                     else:
                         mae = round(weighted_value, 3)
+
+                if lt_sm["sq_error_count"] > 0:
+                    rmse = round(math.sqrt(lt_sm["sq_error_sum"] / lt_sm["sq_error_count"]), 3)
 
                 if lt_sm["bias_count"] > 0:
                     bias = round(lt_sm["bias_sum"] / lt_sm["bias_count"], 3)
@@ -425,6 +478,7 @@ def recompute_weights(city_id, window_days=None):
                     window_days=window_days,
                     bias=bias,
                     lead_time_group=ltg,
+                    rmse=rmse,
                 )
 
     return weights
@@ -511,7 +565,7 @@ def main():
     conn = db.get_connection()
     obs_count = conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0]
     acc_count = conn.execute("SELECT COUNT(*) FROM source_accuracy").fetchone()[0]
-    conn.close()
+    db.close_connection()
     print(f"--- Summary ---")
     print(f"Total observations: {obs_count}")
     print(f"Accuracy entries: {acc_count}")

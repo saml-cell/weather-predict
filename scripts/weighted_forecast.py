@@ -26,7 +26,7 @@ import db
 from db import normalize_condition
 from fetch_weather import (
     geocode, fetch_open_meteo, fetch_wttr, fetch_openweather, fetch_weatherapi,
-    fetch_visual_crossing, WMO_CODES, c_to_f
+    fetch_visual_crossing, fetch_noaa_nws, fetch_ecmwf, WMO_CODES, c_to_f
 )
 from meteo import apply_physics_corrections, dew_point, dew_point_depression, feels_like
 
@@ -107,13 +107,15 @@ def fetch_all_sources(city):
 
     results = []
     source_status = {}
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    with ThreadPoolExecutor(max_workers=7) as pool:
         futures = {
             pool.submit(fetch_open_meteo, lat, lon, tz): "Open-Meteo",
             pool.submit(fetch_wttr, name): "wttr.in",
             pool.submit(fetch_openweather, lat, lon): "OpenWeatherMap",
             pool.submit(fetch_weatherapi, lat, lon): "WeatherAPI",
             pool.submit(fetch_visual_crossing, lat, lon): "VisualCrossing",
+            pool.submit(fetch_noaa_nws, name, lat, lon): "NOAA_NWS",
+            pool.submit(fetch_ecmwf, lat, lon): "ECMWF",
         }
         for future in as_completed(futures):
             source = futures[future]
@@ -170,6 +172,14 @@ def produce_forecast(city_name):
             return weights[source_name][metric]["weight"]
         return default_weight
 
+    def get_bias(source_name, metric):
+        """Get tracked bias for a source/metric. Returns 0.0 if unavailable."""
+        if source_name in weights and metric in weights[source_name]:
+            b = weights[source_name][metric].get("bias")
+            if b is not None:
+                return b
+        return 0.0
+
     # --- Current conditions (weighted) ---
     temps = [(r["current"]["temp_c"], get_weight(r["source"], "temp_high")) for r in results]
     feels = [(r["current"]["feels_like_c"], get_weight(r["source"], "temp_high")) for r in results]
@@ -195,6 +205,15 @@ def produce_forecast(city_name):
         "conditions": [r["current"]["condition"] for r in results if r["current"].get("condition")],
         "temp_spread_c": round(temp_spread, 1),
     }
+
+    # AQI data (pass through from WeatherAPI if available)
+    for r in results:
+        if r["source"] == "WeatherAPI" and r["current"].get("aqi_index") is not None:
+            current["aqi_index"] = r["current"]["aqi_index"]
+            current["pm25"] = r["current"].get("pm25")
+            current["pm10"] = r["current"].get("pm10")
+            current["aqi_source"] = "WeatherAPI"
+            break
 
     # Dew point
     if avg_temp is not None and avg_humidity is not None:
@@ -236,16 +255,22 @@ def produce_forecast(city_name):
                     w_wind = get_weight(source, "wind")
                     w_cond = get_weight(source, "condition")
 
+                    # Bias-correct per-source values before ensemble averaging
+                    bias_temp_high = get_bias(source, "temp_high")
+                    bias_temp_low = get_bias(source, "temp_low")
+                    bias_precip = get_bias(source, "precip_mm")
+                    bias_wind = get_bias(source, "wind")
+
                     if d.get("high_c") is not None:
-                        highs.append((d["high_c"], w_temp))
+                        highs.append((d["high_c"] - bias_temp_high, w_temp))
                     if d.get("low_c") is not None:
-                        lows.append((d["low_c"], w_temp))
+                        lows.append((d["low_c"] - bias_temp_low, w_temp))
                     if d.get("precip_prob") is not None:
                         probs.append((d["precip_prob"], w_precip))
                     if d.get("precip_mm") is not None:
-                        precips.append((d["precip_mm"], w_precip))
+                        precips.append((max(0, d["precip_mm"] - bias_precip), w_precip))
                     if d.get("wind_max_kmh") is not None:
-                        winds_d.append((d["wind_max_kmh"], w_wind))
+                        winds_d.append((max(0, d["wind_max_kmh"] - bias_wind), w_wind))
                     if d.get("condition"):
                         conditions.append((d["condition"], w_cond))
 
@@ -271,6 +296,7 @@ def produce_forecast(city_name):
             humidity_pct=avg_humidity,
             temp_c=day_data["weighted_high_c"],
             wind_kmh=day_data["weighted_wind_kmh"],
+            apply_cc=False,
         )
         day_data["adjusted_precip_prob"] = adjusted.get("precip_prob", day_data["weighted_precip_prob"])
         day_data["adjusted_precip_mm"] = adjusted.get("precip_mm", day_data["weighted_precip_mm"])
@@ -286,6 +312,12 @@ def produce_forecast(city_name):
                         day_data["sunset"] = d["sunset"]
                     if d.get("wind_dir_deg") is not None and "wind_dir_deg" not in day_data:
                         day_data["wind_dir_deg"] = d["wind_dir_deg"]
+                    # Daily AQI from WeatherAPI
+                    if r["source"] == "WeatherAPI" and d.get("aqi_index") is not None:
+                        if "aqi_index" not in day_data:
+                            day_data["aqi_index"] = d["aqi_index"]
+                            day_data["pm25"] = d.get("pm25")
+                            day_data["pm10"] = d.get("pm10")
 
         daily_forecast.append(day_data)
 
@@ -312,6 +344,36 @@ def produce_forecast(city_name):
             hourly_forecast = r["hourly"]
             break
 
+    # --- ECMWF ensemble data (confidence intervals) ---
+    ensemble_data = None
+    for r in results:
+        if r["source"] == "ECMWF" and r.get("ensemble"):
+            ensemble_data = r["ensemble"]
+            # Enrich daily forecast entries with ensemble spread
+            for day_data in daily_forecast:
+                date = day_data["date"]
+                if date in ensemble_data:
+                    es = ensemble_data[date]
+                    day_data["ensemble"] = {
+                        "temp_mean": es.get("temp_mean"),
+                        "temp_std": es.get("temp_std"),
+                        "temp_p10": es.get("temp_p10"),
+                        "temp_p90": es.get("temp_p90"),
+                        "precip_mean": es.get("precip_mean"),
+                        "precip_std": es.get("precip_std"),
+                        "precip_p10": es.get("precip_p10"),
+                        "precip_p90": es.get("precip_p90"),
+                        "precip_prob_from_ensemble": es.get("precip_prob_from_ensemble"),
+                    }
+            break
+
+    # --- WeatherAPI official alerts ---
+    weatherapi_alerts = []
+    for r in results:
+        if r["source"] == "WeatherAPI" and r.get("alerts"):
+            weatherapi_alerts = r["alerts"]
+            break
+
     return {
         "location": {
             "name": city["name"],
@@ -322,6 +384,8 @@ def produce_forecast(city_name):
         "current": current,
         "daily": daily_forecast,
         "hourly": hourly_forecast,
+        "alerts": weatherapi_alerts,
+        "ensemble_available": ensemble_data is not None,
         "sources_used": sources_used,
         "source_status": source_status,
         "source_accuracy": source_info,
@@ -387,6 +451,23 @@ def format_text(forecast):
         # Show physics corrections if any
         for corr in day.get("physics_corrections", []):
             lines.append(f"    ^ {corr}")
+
+        # Show ensemble confidence intervals if available
+        ens = day.get("ensemble")
+        if ens and ens.get("temp_p10") is not None:
+            lines.append(f"    ~ ECMWF ensemble: temp {ens['temp_p10']}-{ens['temp_p90']}C (p10-p90), "
+                         f"precip {ens.get('precip_p10', '?')}-{ens.get('precip_p90', '?')}mm")
+            if ens.get("precip_prob_from_ensemble") is not None:
+                lines.append(f"    ~ ensemble rain prob: {ens['precip_prob_from_ensemble']:.0f}%")
+
+    # Ensemble summary
+    if forecast.get("ensemble_available"):
+        lines.append(f"\n--- ECMWF ENSEMBLE (51-member confidence) ---")
+        for day in forecast.get("daily", []):
+            ens = day.get("ensemble")
+            if ens and ens.get("temp_std") is not None:
+                lines.append(f"  {day['date']}: temp spread={ens['temp_std']:.1f}C  "
+                             f"precip spread={ens.get('precip_std', 0):.1f}mm")
 
     # Source accuracy transparency
     lines.append(f"\n--- SOURCE ACCURACY ---")

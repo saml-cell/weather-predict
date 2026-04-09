@@ -21,11 +21,8 @@ class TestNormalizeCondition(unittest.TestCase):
         self.assertEqual(normalize_condition("Sunny"), "clear")
 
     def test_partly_cloudy(self):
-        # "Partly cloudy" contains "cloudy" which matches first in the map,
-        # so it maps to "partly_cloudy" only if the full phrase is checked.
-        # The actual implementation matches "cloudy" first due to ordering.
         result = normalize_condition("Partly cloudy")
-        self.assertIn(result, ("partly_cloudy", "cloudy"))
+        self.assertEqual(result, "partly_cloudy")
 
     def test_unknown_string(self):
         """Unrecognized descriptions should map to 'unknown'."""

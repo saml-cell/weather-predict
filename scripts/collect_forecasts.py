@@ -10,15 +10,20 @@ Or for a single city:
 """
 
 import json
+import logging
 import os
 import sys
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
+logger = logging.getLogger(__name__)
+
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db
 from db import normalize_condition
-from fetch_weather import fetch_open_meteo, fetch_wttr, fetch_openweather, fetch_weatherapi, fetch_visual_crossing
+from fetch_weather import (fetch_open_meteo, fetch_wttr, fetch_openweather,
+                          fetch_weatherapi, fetch_visual_crossing, fetch_noaa_nws,
+                          fetch_ecmwf)
 
 
 def fetch_all_sources(city):
@@ -28,13 +33,15 @@ def fetch_all_sources(city):
     name = city["name"]
 
     results = []
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    with ThreadPoolExecutor(max_workers=7) as pool:
         futures = {
             pool.submit(fetch_open_meteo, lat, lon, tz): "Open-Meteo",
             pool.submit(fetch_wttr, name): "wttr.in",
             pool.submit(fetch_openweather, lat, lon): "OpenWeatherMap",
             pool.submit(fetch_weatherapi, lat, lon): "WeatherAPI",
             pool.submit(fetch_visual_crossing, lat, lon): "VisualCrossing",
+            pool.submit(fetch_noaa_nws, name, lat, lon): "NOAA_NWS",
+            pool.submit(fetch_ecmwf, lat, lon): "ECMWF",
         }
         for future in as_completed(futures):
             source = futures[future]
@@ -42,8 +49,8 @@ def fetch_all_sources(city):
                 data = future.result()
                 if data:
                     results.append(data)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("Source %s failed for %s: %s", source, name, e)
     return results
 
 
