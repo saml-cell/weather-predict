@@ -111,6 +111,17 @@ LGB_BASE_PARAMS = {
 NUM_BOOST_ROUND = 2000
 EARLY_STOP = 50
 
+# Council Round 3 Step 4 (Aiko): soft T ≥ Td physics penalty on the training
+# loss. When PHYSICS_LOSS_LAMBDA > 0, temp_c and humidity_pct are trained with
+# a custom objective that augments the pinball loss with a physics-constraint
+# term. Temperature adds `λ · max(0, Td_ref − y_pred)` to push predictions
+# above the ensemble dew point; humidity adds `λ · max(0, y_pred − 100)` to
+# push predictions below the physical RH ceiling. Precip + wind use the
+# built-in quantile objective unchanged (no physics coupling to T ≥ Td).
+# Default λ = 0.0 disables the penalty and the trainer falls back to the
+# unchanged built-in quantile objective everywhere.
+DEFAULT_PHYSICS_LOSS_LAMBDA = 0.0
+
 # Per-variable overrides. Wind is noisier than temperature so it benefits
 # from tighter regularization. Council Round 3 Step 3 (Lena, 2026-04-13)
 # tried loosening these to num_leaves=20 / min_data_in_leaf=75 / lambda_l2=0.3
@@ -544,6 +555,51 @@ def rmse(y_true: np.ndarray, y_pred: np.ndarray) -> float:
 # Training
 # ---------------------------------------------------------------------------
 
+def _make_physics_temp_obj(tau: float, lambda_phys: float, td_ref: np.ndarray):
+    """Custom LightGBM objective for `temp_c` with Aiko's physics penalty.
+
+    Loss per row = pinball(y_true, y_pred, tau) + λ · max(0, Td_ref − y_pred)
+    where Td_ref is the ensemble-mean dew point for that row (precomputed,
+    aligned with the training set row order).
+    """
+    td_ref = np.asarray(td_ref, dtype=float)
+
+    def obj(preds, dataset):
+        y_true = np.asarray(dataset.get_label(), dtype=float)
+        # Pinball gradient (d loss / d y_pred):
+        #   (1 − tau) if y_pred >  y_true
+        #   −tau      if y_pred <= y_true
+        grad = np.where(preds > y_true, 1.0 - tau, -tau)
+        # Physics gradient:
+        #   d/dp [ λ · max(0, Td_ref − p) ] = −λ · 1(Td_ref > p)
+        mask = td_ref > preds
+        grad[mask] -= lambda_phys
+        # LightGBM trick for non-smooth quantile-style losses: constant hessian.
+        hess = np.ones_like(grad)
+        return grad, hess
+    return obj
+
+
+# Aiko's physics penalty is deliberately not applied to `humidity_pct`: the
+# T ≥ Td constraint at the same temperature is identically RH ≤ 100%, which
+# is already guaranteed by egress clipping in mos_inference.PHYS_BOUNDS. A
+# soft training-loss penalty on top adds complexity without a physics benefit
+# the egress clip doesn't already provide.
+
+
+def _pinball_feval(tau: float):
+    """LightGBM feval callback — reports pinball loss at the configured τ so
+    early-stopping can drive against the same metric the built-in quantile
+    objective would have. Returned tuple is (name, value, is_higher_better).
+    """
+    def feval(preds, dataset):
+        y_true = np.asarray(dataset.get_label(), dtype=float)
+        diff = y_true - preds
+        loss = np.where(diff >= 0, tau * diff, (tau - 1) * diff)
+        return ("pinball", float(np.mean(loss)), False)
+    return feval
+
+
 def train_one_quantile(
     X_train: pd.DataFrame,
     y_train: pd.Series,
@@ -552,34 +608,86 @@ def train_one_quantile(
     alpha: float,
     categorical: list,
     variable: str = "",
-) -> lgb.Booster:
+    physics_loss_lambda: float = 0.0,
+    td_ref_train: Optional[np.ndarray] = None,
+) -> tuple:
+    """Train one quantile booster. Returns (booster, physics_shift). When
+    physics_shift != 0 the caller MUST add it to any booster.predict(...) output
+    to recover predictions in the original label units — custom objectives
+    don't carry the Dataset's init_score offset through predict()."""
     params = dict(LGB_BASE_PARAMS)
     params["alpha"] = alpha
     if variable in PER_VARIABLE_PARAMS:
         params.update(PER_VARIABLE_PARAMS[variable])
 
+    use_physics = physics_loss_lambda > 0.0 and variable == "temp_c"
+    physics_shift = 0.0
+
+    y_train_use = y_train
+    y_val_use = y_val
+    td_ref_use = td_ref_train
+
+    if use_physics:
+        if td_ref_train is None:
+            raise ValueError(
+                "physics loss enabled for temp_c but td_ref_train is None — "
+                "caller must pass aux_dew_point_c_mean aligned with X_train"
+            )
+        if len(td_ref_train) != len(X_train):
+            raise ValueError(
+                f"td_ref_train length {len(td_ref_train)} != X_train length {len(X_train)}"
+            )
+        # Label shift: boost from zero against centered labels so the tree
+        # ensemble doesn't have to climb the full label mean (~12 °C) over
+        # 2000 boosting rounds at lr=0.05. The shift is applied uniformly to
+        # y_train, y_val, and the physics td_ref — gradients computed inside
+        # the custom objective stay in the shifted frame, and the caller
+        # reverses the shift at predict time.
+        physics_shift = float(np.mean(np.asarray(y_train, dtype=float)))
+        y_train_use = np.asarray(y_train, dtype=float) - physics_shift
+        y_val_use = np.asarray(y_val, dtype=float) - physics_shift
+        td_ref_use = np.asarray(td_ref_train, dtype=float) - physics_shift
+
     train_set = lgb.Dataset(
-        X_train, label=y_train, categorical_feature=categorical, free_raw_data=False
+        X_train, label=y_train_use, categorical_feature=categorical, free_raw_data=False
     )
     val_set = lgb.Dataset(
         X_val,
-        label=y_val,
+        label=y_val_use,
         categorical_feature=categorical,
         reference=train_set,
         free_raw_data=False,
     )
+
+    feval = None
+    if use_physics:
+        params["objective"] = _make_physics_temp_obj(alpha, physics_loss_lambda, td_ref_use)
+        # Custom objective needs a matching custom eval callback for early
+        # stopping: the built-in `quantile` metric is tied to the built-in
+        # quantile objective and cannot be reused with a callable obj.
+        feval = _pinball_feval(alpha)
+        # With a callable objective, the built-in alpha + metric are irrelevant.
+        params.pop("alpha", None)
+        params.pop("metric", None)
+        # Custom-objective + bagging disrupts per-row td_ref alignment because
+        # LightGBM subsamples rows before calling fobj. Disable bagging for
+        # physics runs to keep the row-index guarantee simple.
+        params["bagging_fraction"] = 1.0
+        params["bagging_freq"] = 0
+
     booster = lgb.train(
         params,
         train_set,
         num_boost_round=NUM_BOOST_ROUND,
         valid_sets=[val_set],
         valid_names=["val"],
+        feval=feval,
         callbacks=[
             lgb.early_stopping(stopping_rounds=EARLY_STOP, verbose=False),
             lgb.log_evaluation(period=0),  # silent
         ],
     )
-    return booster
+    return booster, physics_shift
 
 
 def rearrange_quantiles(pred_dict: dict) -> dict:
@@ -642,6 +750,7 @@ def train_variable(
     target_source: str = "era5",
     feature_set: str = FEATURE_SET_V1,
     cities_meta: Optional[dict] = None,
+    physics_loss_lambda: float = 0.0,
 ) -> dict:
     """Train all quantile models for one target variable. Returns metrics dict."""
     logger.info("=" * 60)
@@ -706,26 +815,59 @@ def train_variable(
     if feature_set == FEATURE_SET_V2:
         categorical = categorical + ["hemisphere_ns", "climate_band"]
 
+    # Physics loss Td_ref: only temp_c consumes it. For temp_c we take the
+    # ensemble-mean forecast dew point per training row from the v3 feature
+    # `aux_dew_point_c_mean`. If the feature is missing or all NaN (v1/v2 or
+    # sparse rows) we silently degrade physics loss to 0 for this run.
+    # Humidity physics is deliberately skipped — see note above the physics
+    # objective definitions.
+    td_ref_train: Optional[np.ndarray] = None
+    effective_physics_lambda = 0.0
+    if physics_loss_lambda > 0.0 and variable == "temp_c":
+        if "aux_dew_point_c_mean" in X_train.columns:
+            td_col = X_train["aux_dew_point_c_mean"].to_numpy(dtype=float)
+            # Replace NaNs with a very-low sentinel so the penalty is inert
+            # on those rows instead of tripping the comparison.
+            td_col = np.where(np.isnan(td_col), -1e6, td_col)
+            td_ref_train = td_col
+            effective_physics_lambda = physics_loss_lambda
+            logger.info(
+                "[%s] physics loss ENABLED (λ=%.3f), td_ref from aux_dew_point_c_mean (non-sentinel rows=%d/%d)",
+                variable, physics_loss_lambda,
+                int(np.sum(td_col > -1e5)), len(td_col),
+            )
+        else:
+            logger.warning(
+                "[%s] physics loss requested but aux_dew_point_c_mean is missing — disabling",
+                variable,
+            )
+
     # ---- Train one model per quantile ----
     boosters = {}
+    physics_shifts = {}  # quantile → shift to add back at predict time
     val_preds = {}
     test_preds = {}
     for alpha in quantiles:
         logger.info("[%s] training τ=%.2f on %d rows", variable, alpha, len(X_train))
         t0 = time.time()
-        booster = train_one_quantile(
+        booster, physics_shift = train_one_quantile(
             X_train, y_train, X_val, y_val,
             alpha=alpha, categorical=categorical, variable=variable,
+            physics_loss_lambda=effective_physics_lambda,
+            td_ref_train=td_ref_train,
         )
         elapsed = time.time() - t0
         boosters[alpha] = booster
-        val_preds[alpha] = booster.predict(X_val, num_iteration=booster.best_iteration)
-        test_preds[alpha] = booster.predict(
-            X_test, num_iteration=booster.best_iteration
-        )
+        physics_shifts[alpha] = physics_shift
+        # For physics runs the booster was trained on shifted labels; add the
+        # shift back to recover predictions in the original label units.
+        val_raw = booster.predict(X_val, num_iteration=booster.best_iteration)
+        test_raw = booster.predict(X_test, num_iteration=booster.best_iteration)
+        val_preds[alpha] = val_raw + physics_shift
+        test_preds[alpha] = test_raw + physics_shift
         logger.info(
-            "[%s] τ=%.2f trained in %.1fs (best iter %d)",
-            variable, alpha, elapsed, booster.best_iteration,
+            "[%s] τ=%.2f trained in %.1fs (best iter %d, physics_shift=%.3f)",
+            variable, alpha, elapsed, booster.best_iteration, physics_shift,
         )
 
     # Cross-quantile rearrangement
@@ -838,6 +980,8 @@ def train_variable(
             "val_end": val_end,
             "test_end": test_end,
             "hyperparams": LGB_BASE_PARAMS,
+            "physics_loss_lambda": effective_physics_lambda,
+            "physics_shifts": {str(a): float(physics_shifts[a]) for a in quantiles},
             "num_boost_round_cap": NUM_BOOST_ROUND,
             "early_stopping": EARLY_STOP,
             "best_iterations": {
@@ -959,6 +1103,12 @@ def parse_args():
     p.add_argument(
         "--dry-run", action="store_true", help="Train but don't save models"
     )
+    p.add_argument(
+        "--physics-loss-lambda", type=float, default=DEFAULT_PHYSICS_LOSS_LAMBDA,
+        help="Council R3 Step 4 (Aiko). λ for soft T ≥ Td penalty. Only affects "
+             "temp_c (uses aux_dew_point_c_mean as Td ref, v3 feature set required) "
+             "and humidity_pct (soft RH ≤ 100%%). 0.0 disables. Council default: 0.1.",
+    )
     p.add_argument("--quiet", action="store_true")
     return p.parse_args()
 
@@ -1002,6 +1152,7 @@ def main():
         "city_id": args.city_id,
         "target_source": args.target_source,
         "feature_set": args.feature_set,
+        "physics_loss_lambda": args.physics_loss_lambda,
         "variables": [],
     }
     t0 = time.time()
@@ -1020,6 +1171,7 @@ def main():
                 target_source=args.target_source,
                 feature_set=args.feature_set,
                 cities_meta=cities_meta,
+                physics_loss_lambda=args.physics_loss_lambda,
             )
             report["variables"].append(result)
         except Exception as e:
