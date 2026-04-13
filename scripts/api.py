@@ -27,7 +27,7 @@ import threading
 import functools
 import socket
 from collections import defaultdict
-from datetime import date, timedelta, datetime, timezone
+from datetime import date, timedelta, datetime
 
 # Load .env file if present (so WEATHER_API_KEY etc. work without manual export)
 _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
@@ -54,12 +54,10 @@ logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db
-from db import normalize_condition
 from fetch_weather import geocode
 from weighted_forecast import produce_forecast
-from meteo import dew_point, dew_point_depression, pressure_stability_index
 from seasonal_forecast import produce_seasonal_forecast, format_json_output
-from climate_indices import get_current_index_state, fetch_all_indices, build_climatology
+from climate_indices import get_current_index_state, build_climatology
 from alerts import check_city_alerts
 
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -141,6 +139,7 @@ def require_api_key(f):
 # Rate limiter (in-memory, per-IP)
 # ---------------------------------------------------------------------------
 _rate_limit_store = defaultdict(list)  # "bucket:ip" -> [timestamps]
+_rate_limit_lock = threading.Lock()
 _rate_limit_call_count = 0
 
 _RATE_LIMITS = {
@@ -156,19 +155,20 @@ def _check_rate_limit(ip, bucket="add_city"):
     limits = _RATE_LIMITS.get(bucket, _RATE_LIMITS["api_read"])
     key = f"{bucket}:{ip}"
     now = time.time()
-    timestamps = _rate_limit_store[key]
-    _rate_limit_store[key] = [t for t in timestamps if now - t < limits["window"]]
-    if len(_rate_limit_store[key]) >= limits["max"]:
-        return False
-    _rate_limit_store[key].append(now)
+    with _rate_limit_lock:
+        timestamps = _rate_limit_store[key]
+        _rate_limit_store[key] = [t for t in timestamps if now - t < limits["window"]]
+        if len(_rate_limit_store[key]) >= limits["max"]:
+            return False
+        _rate_limit_store[key].append(now)
 
-    _rate_limit_call_count += 1
-    if _rate_limit_call_count % 100 == 0:
-        max_window = max(r["window"] for r in _RATE_LIMITS.values())
-        stale_keys = [k for k, v in _rate_limit_store.items()
-                      if not v or now - v[-1] > max_window]
-        for k in stale_keys:
-            del _rate_limit_store[k]
+        _rate_limit_call_count += 1
+        if _rate_limit_call_count % 100 == 0:
+            max_window = max(r["window"] for r in _RATE_LIMITS.values())
+            stale_keys = [k for k, v in _rate_limit_store.items()
+                          if not v or now - v[-1] > max_window]
+            for k in stale_keys:
+                del _rate_limit_store[k]
 
     return True
 
@@ -176,17 +176,19 @@ def _check_rate_limit(ip, bucket="add_city"):
 # Forecast cache (in-memory TTL=30min)
 # ---------------------------------------------------------------------------
 _forecast_cache = {}  # city_id -> (timestamp, result)
+_forecast_cache_lock = threading.Lock()
 _FORECAST_TTL = 1800  # 30 minutes
 
 
 def invalidate_forecast_cache(city_id=None):
     """Clear forecast cache. If city_id given, only that city; else all."""
-    if city_id is not None:
-        _forecast_cache.pop(city_id, None)
-        logger.info("Cache invalidated for city_id=%s", city_id)
-    else:
-        _forecast_cache.clear()
-        logger.info("All forecast cache cleared")
+    with _forecast_cache_lock:
+        if city_id is not None:
+            _forecast_cache.pop(city_id, None)
+            logger.info("Cache invalidated for city_id=%s", city_id)
+        else:
+            _forecast_cache.clear()
+            logger.info("All forecast cache cleared")
 
 # ---------------------------------------------------------------------------
 # Static frontend (path-traversal safe via send_from_directory)
@@ -348,7 +350,8 @@ def get_forecast(city_id):
     if not city:
         return jsonify({"error": "City not found"}), 404
 
-    cached = _forecast_cache.get(city_id)
+    with _forecast_cache_lock:
+        cached = _forecast_cache.get(city_id)
     if cached and (time.time() - cached[0]) < _FORECAST_TTL:
         return jsonify(cached[1])
 
@@ -356,7 +359,8 @@ def get_forecast(city_id):
     if "error" in forecast:
         return jsonify(forecast), 500
 
-    _forecast_cache[city_id] = (time.time(), forecast)
+    with _forecast_cache_lock:
+        _forecast_cache[city_id] = (time.time(), forecast)
     return jsonify(forecast)
 
 # ---------------------------------------------------------------------------
@@ -369,14 +373,16 @@ def get_hourly(city_id):
         return jsonify({"error": "City not found"}), 404
 
     # Use the same cache as full forecast to avoid duplicate API calls
-    cached = _forecast_cache.get(city_id)
+    with _forecast_cache_lock:
+        cached = _forecast_cache.get(city_id)
     if cached and (time.time() - cached[0]) < _FORECAST_TTL:
         forecast = cached[1]
     else:
         forecast = produce_forecast(city["name"])
         if "error" in forecast:
             return jsonify(forecast), 500
-        _forecast_cache[city_id] = (time.time(), forecast)
+        with _forecast_cache_lock:
+            _forecast_cache[city_id] = (time.time(), forecast)
 
     return jsonify({
         "city_id": city["id"],
@@ -456,7 +462,7 @@ def get_trends(city_id):
     source_errors = {}
     conn = db.get_connection()
     rows = conn.execute("""
-        SELECT f.source_name, o.obs_date, ABS(f.temp_high_c - o.temp_high_c) AS error
+        SELECT f.source_name, o.obs_date, MIN(ABS(f.temp_high_c - o.temp_high_c)) AS error
         FROM observations o
         JOIN forecasts f ON f.city_id = o.city_id AND f.forecast_date = o.obs_date
         WHERE o.city_id = ? AND o.obs_date BETWEEN ? AND ?
@@ -551,22 +557,33 @@ def get_indices():
 @app.route("/api/seasonal/climatology/<int:city_id>", methods=["POST"])
 @require_api_key
 def build_city_climatology(city_id):
-    """Build/refresh climatology for a city (can be slow)."""
+    """Build/refresh climatology for a city.
+
+    Runs build_climatology() in a background thread and returns immediately
+    with a 202 Accepted status, since the operation can take 30+ seconds.
+    """
     city = db.get_city_by_id(city_id)
     if not city:
         return jsonify({"error": "City not found"}), 404
 
-    try:
-        build_climatology(city["id"], city["lat"], city["lon"])
-        clim = db.get_climatology(city["id"])
-        return jsonify({
-            "city": city,
-            "climatology": {str(k): v for k, v in clim.items()},
-            "months": len(clim),
-        })
-    except Exception as e:
-        logger.exception("Climatology build error for city_id=%d", city_id)
-        return jsonify({"error": "Climatology build failed"}), 500
+    def _build_in_background(cid, lat, lon, name):
+        try:
+            build_climatology(cid, lat, lon)
+            logger.info("Climatology build complete for %s (id=%d)", name, cid)
+        except Exception as e:
+            logger.exception("Climatology build error for city_id=%d", cid)
+
+    threading.Thread(
+        target=_build_in_background,
+        args=(city["id"], city["lat"], city["lon"], city["name"]),
+        daemon=True,
+    ).start()
+
+    return jsonify({
+        "status": "building",
+        "message": f"Climatology build started for {city['name']}. This runs in the background.",
+        "city": city,
+    }), 202
 
 
 # ---------------------------------------------------------------------------
@@ -574,16 +591,35 @@ def build_city_climatology(city_id):
 # ---------------------------------------------------------------------------
 @app.route("/api/alerts", methods=["GET"])
 def get_alerts():
-    """Return weather alerts for all cities or a specific city."""
+    """Return weather alerts for all cities or a specific city.
+
+    When city_id is provided, fetches alerts (including external API calls)
+    for that single city. Without city_id, fetches alerts for all cities
+    using ThreadPoolExecutor with max_workers=3 and a total timeout of 20s.
+    """
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     city_id = request.args.get("city_id", type=int)
     cities = db.get_all_cities()
     if city_id:
         cities = [c for c in cities if c["id"] == city_id]
 
     all_alerts = []
-    for city in cities:
-        alerts = check_city_alerts(city["id"], city["name"])
-        all_alerts.extend(alerts)
+
+    def _fetch_alerts(city):
+        return check_city_alerts(city["id"], city["name"])
+
+    with ThreadPoolExecutor(max_workers=3) as executor:
+        future_to_city = {executor.submit(_fetch_alerts, c): c for c in cities}
+        try:
+            for future in as_completed(future_to_city, timeout=20):
+                try:
+                    alerts = future.result(timeout=5)
+                    all_alerts.extend(alerts)
+                except Exception:
+                    pass  # Skip cities that timeout or error
+        except TimeoutError:
+            pass  # Return whatever alerts we collected before timeout
 
     return jsonify({"alerts": all_alerts, "count": len(all_alerts)})
 
@@ -667,6 +703,114 @@ def internal_error(e):
 # ---------------------------------------------------------------------------
 # Health check (detailed)
 # ---------------------------------------------------------------------------
+@app.route("/api/mos/skill", methods=["GET"])
+def api_mos_skill():
+    """Council Round 3 Step 1+2 operational panel (Marcus's sign-off).
+
+    Returns rows from `mos_daily_skill` for dashboard charting. Query params:
+      days=N           — how many calendar days back (default 30)
+      variable=v       — optional filter: temp_c, humidity_pct, precip_mm, wind_speed_kmh
+      city_id=N        — optional filter on one city
+
+    Response shape:
+      {
+        "rows": [{verify_date, city_id, city_name, variable, crps, cov80, mae,
+                  n_obs, ensemble_mae, best_single_mae}, ...],
+        "summary_by_variable": {variable: {crps, cov80, mae, n_rows, n_days,
+                                           cov80_target_err}},
+        "distinct_dates": [...],
+        "distinct_cities": [{id, name}, ...],
+        "window_days": N,
+      }
+    """
+    try:
+        days = int(request.args.get("days", 30))
+    except (TypeError, ValueError):
+        days = 30
+    days = max(1, min(365, days))
+    variable = request.args.get("variable")
+    try:
+        city_id = int(request.args["city_id"]) if "city_id" in request.args else None
+    except (TypeError, ValueError):
+        city_id = None
+
+    conn = db.get_connection()
+
+    where = ["verify_date >= date('now', ?)"]
+    params: list = [f"-{days} days"]
+    if variable:
+        where.append("mds.variable = ?")
+        params.append(variable)
+    if city_id is not None:
+        where.append("mds.city_id = ?")
+        params.append(city_id)
+    where_sql = " AND ".join(where)
+
+    rows_sql = f"""
+        SELECT mds.verify_date, mds.city_id, c.name AS city_name, mds.variable,
+               mds.n_obs, mds.mos_mae, mds.mos_rmse, mds.mos_crps_proxy AS crps,
+               mds.mos_coverage_80 AS cov80, mds.ensemble_mae, mds.best_single_mae
+        FROM mos_daily_skill mds
+        LEFT JOIN cities c ON c.id = mds.city_id
+        WHERE {where_sql}
+        ORDER BY mds.verify_date ASC, mds.city_id ASC, mds.variable ASC
+    """
+    rows = [dict(r) for r in conn.execute(rows_sql, params).fetchall()]
+
+    # Per-variable aggregates (unweighted average across all rows in the window)
+    summary_sql = f"""
+        SELECT mds.variable,
+               AVG(mds.mos_crps_proxy) AS crps,
+               AVG(mds.mos_coverage_80) AS cov80,
+               AVG(mds.mos_mae) AS mae,
+               AVG(mds.ensemble_mae) AS ensemble_mae,
+               COUNT(*) AS n_rows,
+               COUNT(DISTINCT mds.verify_date) AS n_days
+        FROM mos_daily_skill mds
+        WHERE {where_sql}
+        GROUP BY mds.variable
+    """
+    summary_rows = conn.execute(summary_sql, params).fetchall()
+    summary = {}
+    for r in summary_rows:
+        summary[r["variable"]] = {
+            "crps": r["crps"],
+            "cov80": r["cov80"],
+            "mae": r["mae"],
+            "ensemble_mae": r["ensemble_mae"],
+            "n_rows": r["n_rows"],
+            "n_days": r["n_days"],
+            "cov80_target_err": (
+                abs((r["cov80"] or 0.0) - 0.8) if r["cov80"] is not None else None
+            ),
+        }
+
+    distinct_dates = [
+        r[0] for r in conn.execute(
+            f"SELECT DISTINCT mds.verify_date FROM mos_daily_skill mds "
+            f"WHERE {where_sql} ORDER BY mds.verify_date",
+            params,
+        ).fetchall()
+    ]
+    distinct_cities = [
+        {"id": r[0], "name": r[1]}
+        for r in conn.execute(
+            f"SELECT DISTINCT mds.city_id, c.name FROM mos_daily_skill mds "
+            f"LEFT JOIN cities c ON c.id = mds.city_id "
+            f"WHERE {where_sql} ORDER BY c.name",
+            params,
+        ).fetchall()
+    ]
+
+    return jsonify({
+        "rows": rows,
+        "summary_by_variable": summary,
+        "distinct_dates": distinct_dates,
+        "distinct_cities": distinct_cities,
+        "window_days": days,
+    })
+
+
 @app.route("/api/health", methods=["GET"])
 def health_check():
     cities = db.get_all_cities()
