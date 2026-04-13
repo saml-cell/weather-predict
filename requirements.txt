@@ -3,3 +3,8 @@ scipy>=1.10,<2.0
 flask>=3.0,<4.0
 flask-cors>=5.0,<7.0
 gunicorn>=22.0,<24.0
+
+# Phase 1 MOS trainer — installed into project venv at .venv/
+# See scripts/train_mos_quantile.py and wiki weather-predict-ml-plan
+lightgbm>=4.0,<5.0
+pandas>=2.0,<4.0
