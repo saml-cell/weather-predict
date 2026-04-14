@@ -173,6 +173,18 @@ def predict_quantiles_for_eval(
     for q in list(preds.keys()):
         preds[q] = mos._clip_physics(variable, preds[q])
 
+    # Round 5 P0: apply isotonic calibrators so the panel measures what
+    # /api/forecast actually serves. Mirrors mos_inference.predict_hourly.
+    # Variables without a calibrator (rejected at fit time, e.g. precip_mm,
+    # or pinned-rejected like temp_c) fall through unchanged.
+    calibrators = mos.load_calibrators()
+    cal = calibrators.get(variable)
+    if cal is not None:
+        cal_q10, cal_q50, cal_q90 = mos._apply_calibrator(
+            cal, preds[0.1], preds[0.5], preds[0.9]
+        )
+        preds[0.1], preds[0.5], preds[0.9] = cal_q10, cal_q50, cal_q90
+
     return {"preds": preds, "X_index": X.index}
 
 
