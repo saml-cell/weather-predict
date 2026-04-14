@@ -2306,6 +2306,10 @@
       const dataConfidence = nDays < 7 ? 'very low' : nDays < 14 ? 'low' : nDays < 30 ? 'moderate' : 'high';
       const confColor = nDays < 7 ? 'text-rose-400' : nDays < 14 ? 'text-amber-400' : nDays < 30 ? 'text-yellow-400' : 'text-emerald-400';
 
+      const coldStart = data.cold_start_cities || [];
+      const lowHistory = data.low_history_cities || [];
+      const totalInSystem = data.total_cities_in_system || data.distinct_cities.length;
+
       return (
         <div className="p-4 sm:p-6 max-w-7xl mx-auto">
           <div className="flex items-start justify-between mb-4 gap-3 flex-wrap">
@@ -2313,7 +2317,7 @@
               <h2 className="text-lg font-semibold text-muted-light">Model skill (MOS shadow verify)</h2>
               <p className="text-xs text-muted mt-1">
                 Operational telemetry from the daily shadow verify cron. Council Round 3 Marcus sign-off panel.
-                {' '}Data confidence: <span className={`font-semibold ${confColor}`}>{dataConfidence}</span> ({nDays} days, {data.distinct_cities.length} cities)
+                {' '}Data confidence: <span className={`font-semibold ${confColor}`}>{dataConfidence}</span> ({nDays} days, {data.distinct_cities.length}/{totalInSystem} cities)
               </p>
             </div>
             <div className="flex items-center gap-2 text-xs">
@@ -2327,6 +2331,34 @@
               ))}
             </div>
           </div>
+
+          {/* Cold-start + low-history warning cards (Council R4 Marcus visibility) */}
+          {(coldStart.length > 0 || lowHistory.length > 0) && (
+            <div className="mb-4 space-y-2">
+              {coldStart.length > 0 && (
+                <div className="border border-rose-500/40 bg-rose-500/10 p-3 text-xs" style={{borderRadius:'4px'}}>
+                  <div className="flex items-start gap-2">
+                    <span className="text-rose-400 font-semibold">{'\u26a0'} {coldStart.length} cold-start {coldStart.length === 1 ? 'city' : 'cities'}</span>
+                    <span className="text-muted">— zero skill rows in this window (no accountability loop)</span>
+                  </div>
+                  <div className="text-muted-dim mt-1 font-mono text-[10px]">
+                    {coldStart.map(c => c.name).join(', ')}
+                  </div>
+                </div>
+              )}
+              {lowHistory.length > 0 && (
+                <div className="border border-amber-500/40 bg-amber-500/10 p-3 text-xs" style={{borderRadius:'4px'}}>
+                  <div className="flex items-start gap-2">
+                    <span className="text-amber-400 font-semibold">{'\u26a0'} {lowHistory.length} low-history {lowHistory.length === 1 ? 'city' : 'cities'}</span>
+                    <span className="text-muted">— partial history in window</span>
+                  </div>
+                  <div className="text-muted-dim mt-1 font-mono text-[10px]">
+                    {lowHistory.map(c => `${c.name}(${c.n_days}/${data.distinct_dates.length}d)`).join(', ')}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           {/* Summary table */}
           <div className="mb-6 border border-base-border" style={{borderRadius:'4px', overflow:'hidden'}}>

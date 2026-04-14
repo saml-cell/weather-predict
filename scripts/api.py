@@ -802,12 +802,54 @@ def api_mos_skill():
         ).fetchall()
     ]
 
+    # Cold-start / low-history detection (Council Round 4 Marcus visibility).
+    # A city is "cold-start" if it has zero mos_daily_skill rows in the
+    # selected window. A city is "low-history" if it has rows for fewer than
+    # `min_days_threshold` distinct dates in the window — either because it
+    # was added recently or because its obs backfill is partial.
+    #
+    # Evaluated against the full `cities` table so we can flag cities that
+    # exist in production (are being served forecasts) but have no
+    # accountability loop via the shadow verify.
+    all_cities = [
+        {"id": r[0], "name": r[1]}
+        for r in conn.execute(
+            "SELECT id, name FROM cities ORDER BY name"
+        ).fetchall()
+    ]
+    distinct_city_ids = {c["id"] for c in distinct_cities}
+    cold_start_cities = [c for c in all_cities if c["id"] not in distinct_city_ids]
+
+    # Per-city day count in the window
+    per_city_day_counts = {
+        r[0]: r[1]
+        for r in conn.execute(
+            f"SELECT mds.city_id, COUNT(DISTINCT mds.verify_date) "
+            f"FROM mos_daily_skill mds WHERE {where_sql} GROUP BY mds.city_id",
+            params,
+        ).fetchall()
+    }
+    total_dates = len(distinct_dates)
+    low_history_cities = []
+    for c in all_cities:
+        n_days = per_city_day_counts.get(c["id"], 0)
+        if 0 < n_days < max(1, total_dates):
+            low_history_cities.append({
+                "id": c["id"],
+                "name": c["name"],
+                "n_days": n_days,
+                "missing_days": total_dates - n_days,
+            })
+
     return jsonify({
         "rows": rows,
         "summary_by_variable": summary,
         "distinct_dates": distinct_dates,
         "distinct_cities": distinct_cities,
         "window_days": days,
+        "total_cities_in_system": len(all_cities),
+        "cold_start_cities": cold_start_cities,
+        "low_history_cities": low_history_cities,
     })
 
 
