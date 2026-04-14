@@ -13,7 +13,6 @@ import json
 import logging
 import os
 import sys
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
@@ -21,36 +20,16 @@ logger = logging.getLogger(__name__)
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db
 from db import normalize_condition
-from fetch_weather import (fetch_open_meteo, fetch_wttr, fetch_openweather,
-                          fetch_weatherapi, fetch_visual_crossing, fetch_noaa_nws,
-                          fetch_ecmwf)
+from weighted_forecast import fetch_all_sources as _fetch_all_sources
 
 
 def fetch_all_sources(city):
-    """Fetch from all available sources in parallel for a city."""
-    lat, lon = city["lat"], city["lon"]
-    tz = city.get("timezone", "auto")
-    name = city["name"]
+    """Fetch from all available sources in parallel for a city.
 
-    results = []
-    with ThreadPoolExecutor(max_workers=7) as pool:
-        futures = {
-            pool.submit(fetch_open_meteo, lat, lon, tz): "Open-Meteo",
-            pool.submit(fetch_wttr, name): "wttr.in",
-            pool.submit(fetch_openweather, lat, lon): "OpenWeatherMap",
-            pool.submit(fetch_weatherapi, lat, lon): "WeatherAPI",
-            pool.submit(fetch_visual_crossing, lat, lon): "VisualCrossing",
-            pool.submit(fetch_noaa_nws, name, lat, lon): "NOAA_NWS",
-            pool.submit(fetch_ecmwf, lat, lon): "ECMWF",
-        }
-        for future in as_completed(futures):
-            source = futures[future]
-            try:
-                data = future.result()
-                if data:
-                    results.append(data)
-            except Exception as e:
-                logger.warning("Source %s failed for %s: %s", source, name, e)
+    Thin wrapper around weighted_forecast.fetch_all_sources that discards
+    the source_status dict (not needed for collection).
+    """
+    results, _status = _fetch_all_sources(city)
     return results
 
 

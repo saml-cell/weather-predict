@@ -18,7 +18,6 @@ import json
 import math
 import os
 import sys
-import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -54,11 +53,17 @@ def _load_anomaly_cache():
             _MONTHLY_ANOMALY_CACHE = {}
 
 def _save_anomaly_cache():
-    """Save monthly anomaly cache to disk."""
+    """Save monthly anomaly cache to disk with file locking to prevent
+    multiple processes from overwriting each other."""
+    import fcntl
     try:
         _CACHE_FILE.parent.mkdir(parents=True, exist_ok=True)
         with open(_CACHE_FILE, "w") as f:
-            json.dump(_MONTHLY_ANOMALY_CACHE, f)
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+            try:
+                json.dump(_MONTHLY_ANOMALY_CACHE, f)
+            finally:
+                fcntl.flock(f.fileno(), fcntl.LOCK_UN)
     except Exception:
         pass
 
@@ -291,7 +296,8 @@ def analog_forecast(city_id, lat, lon, target_year, target_month,
             nao_sensitivity = 0.4
 
         temp_anom = oni_val * enso_sensitivity + nao_val * nao_sensitivity
-        precip_anom = -oni_val * 5.0
+        # No real precipitation data — use 0 instead of synthetic formula
+        precip_anom = 0.0
 
         temp_anomalies.append(temp_anom)
         precip_anomalies.append(precip_anom)
@@ -302,6 +308,8 @@ def analog_forecast(city_id, lat, lon, target_year, target_month,
     # Weighted forecast
     temp_forecast = float(np.sum(kernel_weights * temp_anomalies))
     precip_forecast = float(np.sum(kernel_weights * precip_anomalies))
+    # Clamp: precipitation cannot be less than -100% (zero rain)
+    precip_forecast = max(-100.0, precip_forecast)
 
     # Spread (uncertainty)
     temp_spread = float(np.sqrt(np.sum(kernel_weights * (temp_anomalies - temp_forecast) ** 2)))
@@ -442,6 +450,8 @@ def ridge_regression_forecast(city_id, lat, lon, target_year, target_month,
             precip_forecast = 0.0
     else:
         precip_forecast = 0.0
+    # Clamp: precipitation cannot be less than -100% (zero rain)
+    precip_forecast = max(-100.0, precip_forecast)
 
     # Tercile probabilities
     tercile_probs = _compute_tercile_probs(
@@ -588,7 +598,9 @@ def composite_forecast(city_id, lat, lon, target_year, target_month,
     temp_spread = float(np.std(temp_anomalies)) if len(temp_anomalies) > 1 else 1.0
     temp_spread = max(temp_spread, 0.3)
 
-    precip_forecast = float(np.mean(precip_anomalies_comp)) if len(precip_anomalies_comp) > 0 else -temp_forecast * 3.0
+    precip_forecast = float(np.mean(precip_anomalies_comp)) if len(precip_anomalies_comp) > 0 else 0.0
+    # Clamp: precipitation cannot be less than -100% (zero rain)
+    precip_forecast = max(-100.0, precip_forecast)
 
     tercile_probs = _compute_tercile_probs(
         temp_forecast, temp_spread,
@@ -678,6 +690,8 @@ def ecmwf_seasonal_forecast(city_id, lat, lon, target_year, target_month,
     precip_anomaly = 0.0
     if total_precip is not None and clim.get("precip_mean") and clim["precip_mean"] > 0:
         precip_anomaly = ((total_precip - clim["precip_mean"]) / clim["precip_mean"]) * 100
+    # Clamp: precipitation cannot be less than -100% (zero rain)
+    precip_anomaly = max(-100.0, precip_anomaly)
 
     # Estimate spread from daily variability
     if len(t_max_month) > 1:
@@ -800,6 +814,8 @@ def bayesian_model_average(method_forecasts, city_id=None):
 
     mu_temp = float(np.sum(weights * temp_means))
     mu_precip = float(np.sum(weights * precip_means))
+    # Clamp: precipitation anomaly cannot be below -100% (zero rain)
+    mu_precip = max(-100.0, mu_precip)
 
     # BMA variance: sum(w * (sigma^2 + mu^2)) - mu_bma^2
     sigma_bma_sq = float(np.sum(weights * (spreads ** 2 + temp_means ** 2)) - mu_temp ** 2)
@@ -1057,146 +1073,5 @@ def _empty_forecast(method, reason):
         },
         "error": reason,
     }
-
-
-# ===================================================================
-# HINDCAST VERIFICATION
-# ===================================================================
-def run_hindcast_verification(city_id, lat, lon, climatology,
-                              verify_years=5, index_series_cache=None):
-    """Run leave-one-out hindcast verification over recent years.
-
-    For each of the last `verify_years` years, re-runs the seasonal forecast
-    for each month and compares against observed anomalies.
-    Stores skill scores in seasonal_skill table.
-
-    Returns: dict of {method: {metric: value}}
-    """
-    import logging
-    logger = logging.getLogger(__name__)
-    now = datetime.now(timezone.utc)
-    current_year = now.year
-    current_month = now.month
-
-    methods_forecasts = {}  # {method: [(forecast_anom, observed_anom, tercile_fc, obs_cat)]}
-
-    for year_offset in range(1, verify_years + 1):
-        verify_year = current_year - year_offset
-        for month in range(1, 13):
-            # Skip months we don't have observations for yet
-            if verify_year == current_year and month >= current_month:
-                continue
-
-            clim = climatology.get(month)
-            if not clim or clim.get("temp_high_mean") is None:
-                continue
-
-            clim_temp_mean = (clim["temp_high_mean"] +
-                              clim.get("temp_low_mean", clim["temp_high_mean"])) / 2.0
-            clim_precip_mean = clim.get("precip_mean")
-            clim_std = clim.get("temp_high_std", 1.0) or 1.0
-
-            # Get actual observed anomaly
-            obs = get_observed_monthly_anomaly(
-                lat, lon, verify_year, month, clim_temp_mean, clim_precip_mean)
-            if obs is None:
-                continue
-
-            obs_temp_anom = obs[0]
-
-            # Classify observed into tercile
-            bn_thresh = TERCILE_Z_LOW * clim_std
-            an_thresh = TERCILE_Z_HIGH * clim_std
-            if obs_temp_anom < bn_thresh:
-                obs_cat = 0  # below normal
-            elif obs_temp_anom > an_thresh:
-                obs_cat = 2  # above normal
-            else:
-                obs_cat = 1  # near normal
-
-            # Run each method (lead=1 for simplicity)
-            try:
-                methods = [
-                    analog_forecast(city_id, lat, lon, verify_year, month,
-                                    climatology, index_series_cache),
-                    ridge_regression_forecast(city_id, lat, lon, verify_year, month,
-                                              climatology, index_series_cache),
-                    composite_forecast(city_id, lat, lon, verify_year, month,
-                                       climatology, index_series_cache),
-                ]
-            except Exception as e:
-                logger.debug("Hindcast error for %d-%02d: %s", verify_year, month, e)
-                continue
-
-            for fc in methods:
-                method = fc.get("method", "unknown")
-                if fc.get("temp_anomaly_c") is None:
-                    continue
-
-                if method not in methods_forecasts:
-                    methods_forecasts[method] = []
-
-                tp = fc.get("tercile_probs", {})
-                tercile_fc = (
-                    tp.get("below_normal", 0.333),
-                    tp.get("near_normal", 0.334),
-                    tp.get("above_normal", 0.333),
-                )
-                # Predicted category = highest probability tercile
-                pred_cat = int(np.argmax(tercile_fc))
-
-                methods_forecasts[method].append({
-                    "fc_anom": fc["temp_anomaly_c"],
-                    "obs_anom": obs_temp_anom,
-                    "tercile_fc": tercile_fc,
-                    "obs_cat": obs_cat,
-                    "pred_cat": pred_cat,
-                })
-
-    # Compute skill scores per method
-    results = {}
-    for method, pairs in methods_forecasts.items():
-        if len(pairs) < 6:
-            continue
-
-        fc_anoms = [p["fc_anom"] for p in pairs]
-        obs_anoms = [p["obs_anom"] for p in pairs]
-        tercile_fcs = [p["tercile_fc"] for p in pairs]
-        obs_cats = [p["obs_cat"] for p in pairs]
-        pred_cats = [p["pred_cat"] for p in pairs]
-
-        # MAE
-        mae = float(np.mean(np.abs(np.array(fc_anoms) - np.array(obs_anoms))))
-        # Correlation
-        corr = float(np.corrcoef(fc_anoms, obs_anoms)[0, 1]) if len(pairs) > 2 else 0.0
-        # ACC
-        acc = compute_acc(fc_anoms, obs_anoms)
-        # RPSS
-        rpss = compute_rpss(tercile_fcs, obs_cats)
-        # HSS
-        hss = compute_hss(pred_cats, obs_cats)
-
-        results[method] = {
-            "mae": round(mae, 3),
-            "correlation": round(corr, 3),
-            "acc": round(acc, 3),
-            "rpss": round(rpss, 3),
-            "hss": round(hss, 3),
-            "sample_count": len(pairs),
-        }
-
-        # Store in DB
-        for metric, value in [("mae", mae), ("correlation", corr),
-                               ("acc", acc), ("rpss", rpss), ("hss", hss)]:
-            db.upsert_seasonal_skill(
-                city_id=city_id,
-                method=method,
-                metric=metric,
-                value=round(value, 4),
-                sample_count=len(pairs),
-            )
-
-        logger.info("Hindcast %s: MAE=%.2f, corr=%.2f, ACC=%.2f, RPSS=%.2f, HSS=%.2f (n=%d)",
-                     method, mae, corr, acc, rpss, hss, len(pairs))
 
     return results

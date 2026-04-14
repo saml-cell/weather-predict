@@ -39,10 +39,10 @@ PIPELINE_STEPS = {
         "extra_args": [],
     },
     "fetch": {
-        "script": "fetch_weather.py",
+        "script": "collect_forecasts.py",
         "description": "Fetch weather data from all sources",
-                "per_city": True,
-        "extra_args": ["--store"],
+                "per_city": False,
+        "extra_args": [],
     },
     "indices": {
         "script": "climate_indices.py",
@@ -136,10 +136,12 @@ def run_cleanup_step() -> dict:
         sys.path.insert(0, str(SCRIPTS_DIR))
         import db as _db
         result = _db.cleanup_old_data(forecast_days=90, observation_days=365)
+        pressure_deleted = _db.cleanup_pressure_log(days=7)
         elapsed = time.time() - start_time
         print(f"    OK  cleanup ({elapsed:.1f}s) — "
               f"{result['forecasts_deleted']} forecasts, "
-              f"{result['observations_deleted']} observations removed")
+              f"{result['observations_deleted']} observations, "
+              f"{pressure_deleted} pressure log entries removed")
         return {"step": "cleanup", "success": True, "elapsed": elapsed}
     except Exception as e:
         elapsed = time.time() - start_time

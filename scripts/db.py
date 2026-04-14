@@ -11,7 +11,7 @@ import logging
 import os
 import sqlite3
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from datetime import timezone as _tz
 
 logger = logging.getLogger(__name__)
@@ -190,11 +190,12 @@ def get_all_cities():
     return [dict(r) for r in rows]
 
 def insert_city(name, country, lat, lon, timezone="auto"):
-    """Insert a city. Returns city_id. Skips if lat/lon already exists."""
+    """Insert a city. Returns city_id. Skips if lat/lon already exists within ~11km
+    (ROUND to 1 decimal) AND the name matches case-insensitively."""
     conn = get_connection()
     existing = conn.execute(
-        "SELECT id FROM cities WHERE ROUND(lat, 2) = ROUND(?, 2) AND ROUND(lon, 2) = ROUND(?, 2)",
-        (lat, lon)
+        "SELECT id FROM cities WHERE ROUND(lat, 1) = ROUND(?, 1) AND ROUND(lon, 1) = ROUND(?, 1) AND LOWER(name) = LOWER(?)",
+        (lat, lon, name)
     ).fetchone()
     if existing:
         return existing["id"]
@@ -204,32 +205,14 @@ def insert_city(name, country, lat, lon, timezone="auto"):
     )
     conn.commit()
     row = conn.execute(
-        "SELECT id FROM cities WHERE ROUND(lat, 2) = ROUND(?, 2) AND ROUND(lon, 2) = ROUND(?, 2)",
-        (lat, lon)
+        "SELECT id FROM cities WHERE ROUND(lat, 1) = ROUND(?, 1) AND ROUND(lon, 1) = ROUND(?, 1) AND LOWER(name) = LOWER(?)",
+        (lat, lon, name)
     ).fetchone()
     return row["id"]
 
 # ---------------------------------------------------------------------------
 # Forecast operations
 # ---------------------------------------------------------------------------
-def insert_forecast(city_id, source_name, fetched_at, forecast_date,
-                    temp_high_c=None, temp_low_c=None, precip_prob=None,
-                    precip_mm=None, wind_max_kmh=None, condition_text=None,
-                    pressure_hpa=None, humidity_pct=None, raw_json=None):
-    """Insert or replace a forecast row."""
-    conn = get_connection()
-    conn.execute("""
-        INSERT OR REPLACE INTO forecasts
-        (city_id, source_name, fetched_at, forecast_date,
-         temp_high_c, temp_low_c, precip_prob, precip_mm,
-         wind_max_kmh, condition_text, pressure_hpa, humidity_pct, raw_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (city_id, source_name, fetched_at, forecast_date,
-          temp_high_c, temp_low_c, precip_prob, precip_mm,
-          wind_max_kmh, condition_text, pressure_hpa, humidity_pct, raw_json))
-    conn.commit()
-
-
 def insert_forecasts_batch(rows):
     """Insert multiple forecast rows in one transaction. Each row is a tuple."""
     conn = get_connection()
@@ -251,18 +234,6 @@ def get_forecasts_for_date(city_id, forecast_date):
         WHERE city_id = ? AND forecast_date = ?
         ORDER BY source_name
     """, (city_id, forecast_date)).fetchall()
-
-    return [dict(r) for r in rows]
-
-def get_forecasts_in_window(city_id, source_name, start_date, end_date):
-    """Get all forecasts from a source within a date range."""
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT * FROM forecasts
-        WHERE city_id = ? AND source_name = ?
-          AND forecast_date >= ? AND forecast_date <= ?
-        ORDER BY forecast_date
-    """, (city_id, source_name, start_date, end_date)).fetchall()
 
     return [dict(r) for r in rows]
 
@@ -356,17 +327,6 @@ def upsert_accuracy(city_id, source_name, metric, mae=None, accuracy_pct=None,
 # ---------------------------------------------------------------------------
 # Climate index operations (seasonal forecasting)
 # ---------------------------------------------------------------------------
-def insert_climate_index(index_name, year, month, value):
-    """Insert or replace a single climate index value."""
-    conn = get_connection()
-    conn.execute("""
-        INSERT OR REPLACE INTO climate_indices
-        (index_name, year, month, value, fetched_at)
-        VALUES (?, ?, ?, ?, ?)
-    """, (index_name, year, month, value, _now_utc()))
-    conn.commit()
-
-
 def insert_climate_indices_batch(rows):
     """Bulk insert climate index values.
     Each row: (index_name, year, month, value).
@@ -380,16 +340,6 @@ def insert_climate_indices_batch(rows):
     """, [(r[0], r[1], r[2], r[3], now) for r in rows])
     conn.commit()
 
-
-def get_climate_index(index_name, year, month):
-    """Get a single index value. Returns float or None."""
-    conn = get_connection()
-    row = conn.execute(
-        "SELECT value FROM climate_indices WHERE index_name = ? AND year = ? AND month = ?",
-        (index_name, year, month)
-    ).fetchone()
-
-    return row["value"] if row else None
 
 def get_climate_index_series(index_name, start_year=None, end_year=None):
     """Get full history for an index. Returns {(year, month): value}."""
@@ -507,17 +457,6 @@ def insert_seasonal_forecast(city_id, target_year, target_month, method, forecas
     conn.commit()
 
 
-def get_seasonal_forecasts(city_id, target_year, target_month):
-    """Get all method forecasts for a city/year/month. Returns list of dicts."""
-    conn = get_connection()
-    rows = conn.execute("""
-        SELECT * FROM seasonal_forecasts
-        WHERE city_id = ? AND target_year = ? AND target_month = ?
-        ORDER BY method
-    """, (city_id, target_year, target_month)).fetchall()
-
-    return [dict(r) for r in rows]
-
 # ---------------------------------------------------------------------------
 # Seasonal skill operations
 # ---------------------------------------------------------------------------
@@ -579,4 +518,73 @@ def cleanup_old_data(forecast_days=90, observation_days=365):
                      fc_deleted, forecast_days, obs_deleted, observation_days)
 
     return {"forecasts_deleted": fc_deleted, "observations_deleted": obs_deleted}
+
+
+# ---------------------------------------------------------------------------
+# Pressure trend tracking
+# ---------------------------------------------------------------------------
+def log_pressure(city_id, pressure_hpa, timestamp=None):
+    """Insert a pressure reading into the pressure_log table.
+
+    Args:
+        city_id: City ID from the cities table.
+        pressure_hpa: Barometric pressure in hPa.
+        timestamp: ISO string; defaults to current UTC time.
+    """
+    if city_id is None or pressure_hpa is None:
+        return
+    if timestamp is None:
+        timestamp = _now_utc()
+    conn = get_connection()
+    conn.execute(
+        "INSERT OR REPLACE INTO pressure_log (city_id, timestamp, pressure_hpa) VALUES (?, ?, ?)",
+        (city_id, timestamp, pressure_hpa)
+    )
+    conn.commit()
+
+
+def get_pressure_trend(city_id, hours=3):
+    """Compute pressure change over the last *hours* hours, normalised to hPa/3h.
+
+    Returns the trend as a float (negative = falling), or None if there are
+    fewer than 2 readings spanning at least 30 minutes in the window.
+    """
+    if city_id is None:
+        return None
+    conn = get_connection()
+    cutoff = (datetime.now(_tz.utc) - timedelta(hours=hours)).isoformat()
+    rows = conn.execute(
+        "SELECT timestamp, pressure_hpa FROM pressure_log "
+        "WHERE city_id = ? AND timestamp >= ? ORDER BY timestamp",
+        (city_id, cutoff)
+    ).fetchall()
+    if len(rows) < 2:
+        return None
+
+    first = rows[0]
+    last = rows[-1]
+
+    t0 = datetime.fromisoformat(first["timestamp"])
+    t1 = datetime.fromisoformat(last["timestamp"])
+    span_hours = (t1 - t0).total_seconds() / 3600.0
+    if span_hours < 0.5:
+        return None  # need at least 30 min span for a meaningful trend
+
+    delta_hpa = last["pressure_hpa"] - first["pressure_hpa"]
+    # normalise to per-3-hour rate
+    trend = delta_hpa / span_hours * 3.0
+    return round(trend, 2)
+
+
+def cleanup_pressure_log(days=7):
+    """Delete pressure_log entries older than *days* days. Returns count deleted."""
+    conn = get_connection()
+    cutoff = (datetime.now(_tz.utc) - timedelta(days=days)).isoformat()
+    deleted = conn.execute(
+        "DELETE FROM pressure_log WHERE timestamp < ?", (cutoff,)
+    ).rowcount
+    conn.commit()
+    if deleted:
+        logger.info("Pressure log cleanup: deleted %d entries (>%dd)", deleted, days)
+    return deleted
 

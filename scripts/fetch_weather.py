@@ -25,8 +25,7 @@ import logging
 import os
 import sys
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 from urllib.request import urlopen, Request
 from urllib.error import URLError, HTTPError
 from urllib.parse import quote
@@ -470,9 +469,9 @@ def _nws_condition(short_forecast):
         return "Slight snow"
     if "rain" in lower and ("heavy" in lower or "downpour" in lower):
         return "Heavy rain"
-    if "rain" in lower or "showers" in lower:
-        return "Slight rain"
     if "freezing rain" in lower or "ice" in lower:
+        return "Slight rain"
+    if "rain" in lower or "showers" in lower:
         return "Slight rain"
     if "sleet" in lower:
         return "Slight rain"
@@ -897,7 +896,7 @@ def validate_weather_data(result):
     cur["humidity"] = _valid_or_none(cur.get("humidity"), 0, 100)
     cur["precipitation_mm"] = _valid_or_none(cur.get("precipitation_mm"), 0, float("inf"))
     cur["wind_speed_kmh"] = _valid_or_none(cur.get("wind_speed_kmh"), 0, 500)
-    cur["pressure_hpa"] = _valid_or_none(cur.get("pressure_hpa"), 850, 1090)
+    cur["pressure_hpa"] = _valid_or_none(cur.get("pressure_hpa"), 550, 1090)
 
     for day in result.get("daily", []):
         day["high_c"] = _valid_or_none(day.get("high_c"), -70, 60)
@@ -909,6 +908,45 @@ def validate_weather_data(result):
 
 
 # ---------------------------------------------------------------------------
+# Sea surface temperature (Open-Meteo Marine API)
+# ---------------------------------------------------------------------------
+def fetch_sea_temperature(lat, lon):
+    """Fetch current sea surface temperature from Open-Meteo Marine API.
+
+    Returns dict with sea_temp_c or None if location is not near coast.
+    The Marine API returns null for inland locations, so this is self-filtering.
+    """
+    url = (
+        f"https://marine-api.open-meteo.com/v1/marine?"
+        f"latitude={lat}&longitude={lon}"
+        f"&current=sea_surface_temperature"
+        f"&daily=sea_surface_temperature_max"
+        f"&timezone=auto&forecast_days=7"
+    )
+    raw = fetch_json(url, timeout=10, retries=1)
+    if not raw:
+        return None
+
+    current = raw.get("current", {})
+    sea_temp = current.get("sea_surface_temperature")
+    if sea_temp is None:
+        return None
+
+    daily = raw.get("daily", {})
+    daily_temps = []
+    dates = daily.get("time", [])
+    max_temps = daily.get("sea_surface_temperature_max", [])
+    for i, date in enumerate(dates):
+        if i < len(max_temps) and max_temps[i] is not None:
+            daily_temps.append({"date": date, "sea_temp_c": max_temps[i]})
+
+    return {
+        "sea_temp_c": round(sea_temp, 1),
+        "daily_sea_temps": daily_temps,
+    }
+
+
+# ---------------------------------------------------------------------------
 # Consensus builder
 # ---------------------------------------------------------------------------
 def c_to_f(c):
@@ -916,239 +954,6 @@ def c_to_f(c):
     if c is None:
         return None
     return round(c * 9 / 5 + 32, 1)
-
-def build_consensus(results):
-    """Compare sources and build a consensus analysis."""
-    if not results:
-        return {"error": "No weather data available from any source."}
-
-    sources_used = [r["source"] for r in results]
-    temps = [r["current"]["temp_c"] for r in results if r["current"]["temp_c"] is not None]
-    feels = [r["current"]["feels_like_c"] for r in results if r["current"]["feels_like_c"] is not None]
-    humids = [r["current"]["humidity"] for r in results if r["current"]["humidity"] is not None]
-    winds = [r["current"]["wind_speed_kmh"] for r in results if r["current"]["wind_speed_kmh"] is not None]
-    conditions = [r["current"]["condition"] for r in results if r["current"]["condition"]]
-
-    temp_spread = max(temps) - min(temps) if len(temps) > 1 else 0
-    if temp_spread <= 2:
-        confidence = "HIGH"
-    elif temp_spread <= 5:
-        confidence = "MODERATE"
-    else:
-        confidence = "LOW"
-
-    consensus = {
-        "sources_used": sources_used,
-        "source_count": len(results),
-        "current": {
-            "temp_c": round(sum(temps) / len(temps), 1) if temps else None,
-            "temp_f": c_to_f(round(sum(temps) / len(temps), 1)) if temps else None,
-            "feels_like_c": round(sum(feels) / len(feels), 1) if feels else None,
-            "feels_like_f": c_to_f(round(sum(feels) / len(feels), 1)) if feels else None,
-            "humidity": round(sum(humids) / len(humids)) if humids else None,
-            "wind_speed_kmh": round(sum(winds) / len(winds), 1) if winds else None,
-            "conditions": conditions,
-            "temp_spread_c": round(temp_spread, 1),
-            "confidence": confidence,
-        },
-        "daily_consensus": [],
-        "per_source": results,
-    }
-
-    # Build daily consensus from all sources
-    all_dates = set()
-    for r in results:
-        for d in r.get("daily", []):
-            if d.get("date"):
-                all_dates.add(d["date"])
-
-    for date in sorted(all_dates)[:7]:
-        day_data = {"date": date, "sources": {}}
-        highs, lows, probs, conds = [], [], [], []
-
-        for r in results:
-            for d in r.get("daily", []):
-                if d.get("date") == date:
-                    day_data["sources"][r["source"]] = d
-                    if d.get("high_c") is not None:
-                        highs.append(d["high_c"])
-                    if d.get("low_c") is not None:
-                        lows.append(d["low_c"])
-                    if d.get("precip_prob") is not None:
-                        probs.append(d["precip_prob"])
-                    if d.get("condition"):
-                        conds.append(d["condition"])
-
-        day_data["consensus_high_c"] = round(sum(highs) / len(highs), 1) if highs else None
-        day_data["consensus_low_c"] = round(sum(lows) / len(lows), 1) if lows else None
-        day_data["consensus_high_f"] = c_to_f(day_data["consensus_high_c"])
-        day_data["consensus_low_f"] = c_to_f(day_data["consensus_low_c"])
-        day_data["avg_precip_prob"] = round(sum(probs) / len(probs)) if probs else None
-        day_data["conditions"] = conds
-        day_data["high_spread"] = round(max(highs) - min(highs), 1) if len(highs) > 1 else 0
-
-        consensus["daily_consensus"].append(day_data)
-
-    return consensus
-
-# ---------------------------------------------------------------------------
-# Market weather analysis
-# ---------------------------------------------------------------------------
-def analyze_market_weather(consensus, location):
-    """Flag weather events that could impact commodity/energy markets."""
-    alerts = []
-    city = location.get("name", "")
-
-    for day in consensus.get("daily_consensus", []):
-        high = day.get("consensus_high_c")
-        low = day.get("consensus_low_c")
-        precip = day.get("avg_precip_prob")
-        conds = [c.lower() for c in day.get("conditions", [])]
-        date = day.get("date", "")
-
-        # Extreme heat
-        if high and high > 35:
-            alerts.append(f"{date}: Extreme heat ({high}C) — watch energy/electricity demand, cooling costs")
-
-        # Extreme cold
-        if low and low < -10:
-            alerts.append(f"{date}: Extreme cold ({low}C) — natural gas demand spike, heating oil, frost risk for agriculture")
-
-        # Heavy rain / flooding
-        if precip and precip > 80:
-            alerts.append(f"{date}: High precipitation probability ({precip}%) — potential flooding, shipping/logistics disruptions")
-
-        # Thunderstorms
-        if any("thunder" in c for c in conds):
-            alerts.append(f"{date}: Thunderstorms expected — flight delays, outdoor event disruption, possible hail damage")
-
-        # Heavy snow
-        if any("heavy snow" in c for c in conds):
-            alerts.append(f"{date}: Heavy snow — transport disruption, energy demand increase, construction delays")
-
-        # Strong winds
-        for src_data in day.get("sources", {}).values():
-            if src_data.get("wind_max_kmh") and src_data["wind_max_kmh"] > 60:
-                alerts.append(f"{date}: Strong winds ({src_data['wind_max_kmh']} km/h) — renewable energy output, shipping risk")
-                break
-
-    return alerts
-
-# ---------------------------------------------------------------------------
-# Personal planning advice
-# ---------------------------------------------------------------------------
-def personal_advice(consensus):
-    """Generate what-to-wear / what-to-bring advice."""
-    cur = consensus.get("current", {})
-    temp = cur.get("temp_c")
-    feels = cur.get("feels_like_c")
-    humidity = cur.get("humidity")
-    wind = cur.get("wind_speed_kmh")
-
-    tips = []
-    if temp is None:
-        return ["Could not generate advice — no temperature data available."]
-
-    # Clothing
-    if feels is not None and feels < 0:
-        tips.append("Bundle up — heavy coat, gloves, hat. It feels below freezing.")
-    elif feels is not None and feels < 10:
-        tips.append("Jacket weather — a warm layer and maybe a scarf.")
-    elif feels is not None and feels < 18:
-        tips.append("Light jacket or hoodie should do the trick.")
-    elif feels is not None and feels < 25:
-        tips.append("T-shirt weather. Comfortable and pleasant.")
-    else:
-        tips.append("It's hot — dress light, stay hydrated, wear sunscreen.")
-
-    # Rain check for today
-    today_data = consensus.get("daily_consensus", [{}])[0] if consensus.get("daily_consensus") else {}
-    precip = today_data.get("avg_precip_prob")
-    if precip and precip > 50:
-        tips.append(f"Bring an umbrella — {precip}% chance of rain today.")
-    elif precip and precip > 25:
-        tips.append(f"Maybe throw an umbrella in your bag — {precip}% rain chance.")
-
-    # Wind
-    if wind and wind > 40:
-        tips.append("It's quite windy — secure loose items and expect wind chill.")
-
-    # Humidity
-    if humidity and humidity > 80:
-        tips.append("Very humid — it'll feel stickier than the temperature suggests.")
-
-    return tips
-
-# ---------------------------------------------------------------------------
-# Output formatters
-# ---------------------------------------------------------------------------
-def format_text(consensus, location, market_alerts, advice):
-    """Format a human-readable weather report."""
-    lines = []
-    cur = consensus["current"]
-    name = f"{location['name']}, {location['country']}"
-
-    lines.append(f"{'='*60}")
-    lines.append(f"  WEATHER ANALYST — {name.upper()}")
-    lines.append(f"  Sources: {', '.join(consensus['sources_used'])} ({consensus['source_count']} sources)")
-    lines.append(f"  Confidence: {cur['confidence']} (temp spread: {cur['temp_spread_c']}C)")
-    lines.append(f"  Generated: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
-    lines.append(f"{'='*60}")
-
-    lines.append(f"\n--- RIGHT NOW ---")
-    lines.append(f"  Temperature:  {cur['temp_c']}C / {cur['temp_f']}F")
-    lines.append(f"  Feels like:   {cur['feels_like_c']}C / {cur['feels_like_f']}F")
-    lines.append(f"  Humidity:     {cur['humidity']}%")
-    lines.append(f"  Wind:         {cur['wind_speed_kmh']} km/h")
-    lines.append(f"  Conditions:   {', '.join(set(cur['conditions']))}")
-
-    lines.append(f"\n--- PERSONAL PLANNING ---")
-    for tip in advice:
-        lines.append(f"  * {tip}")
-
-    lines.append(f"\n--- NEXT 7 DAYS ---")
-    lines.append(f"  {'Date':<12} {'High':>6} {'Low':>6} {'Rain%':>6}  Condition")
-    lines.append(f"  {'-'*50}")
-    for day in consensus["daily_consensus"]:
-        h = f"{day['consensus_high_c']}C" if day['consensus_high_c'] else "  - "
-        l = f"{day['consensus_low_c']}C" if day['consensus_low_c'] else "  - "
-        p = f"{day['avg_precip_prob']}%" if day['avg_precip_prob'] is not None else "  - "
-        c = ", ".join(set(day["conditions"])) if day["conditions"] else "-"
-        spread_note = f" [spread: {day['high_spread']}C]" if day['high_spread'] > 3 else ""
-        lines.append(f"  {day['date']:<12} {h:>6} {l:>6} {p:>6}  {c}{spread_note}")
-
-    if market_alerts:
-        lines.append(f"\n--- MARKET WEATHER WATCH ---")
-        for alert in market_alerts:
-            lines.append(f"  ! {alert}")
-    else:
-        lines.append(f"\n--- MARKET WEATHER WATCH ---")
-        lines.append(f"  No significant market-moving weather events in the forecast.")
-
-    lines.append(f"\n{'='*60}")
-    return "\n".join(lines)
-
-
-def format_scheduled(consensus, location, market_alerts):
-    """Compact morning briefing format."""
-    cur = consensus["current"]
-    name = f"{location['name']}"
-    today = consensus["daily_consensus"][0] if consensus.get("daily_consensus") else {}
-
-    summary_conds = ", ".join(set(cur.get("conditions", [])))
-    high = today.get("consensus_high_c", "?")
-    low = today.get("consensus_low_c", "?")
-    precip = today.get("avg_precip_prob", "?")
-
-    lines = [
-        f"Weather {name}: {summary_conds}, {cur['temp_c']}C now",
-        f"Today: {high}C / {low}C | Rain: {precip}%",
-        f"Confidence: {cur['confidence']} ({consensus['source_count']} sources)",
-    ]
-    if market_alerts:
-        lines.append(f"Market: {market_alerts[0]}")
-
-    return "\n".join(lines)
 
 # ---------------------------------------------------------------------------
 # Main
@@ -1158,121 +963,24 @@ def main():
     parser.add_argument("city", help="City name to look up")
     parser.add_argument("--scheduled", action="store_true", help="Compact briefing mode")
     parser.add_argument("--json", action="store_true", help="Output raw JSON")
-    parser.add_argument("--weighted", action="store_true",
-                        help="Use weighted ensemble with DB-backed accuracy scores")
-    parser.add_argument("--store", action="store_true",
-                        help="Store fetched forecasts in the database")
     args = parser.parse_args()
 
-    # Weighted mode delegates to weighted_forecast.py
-    if args.weighted:
-        try:
-            from weighted_forecast import produce_forecast, format_text as wf_text, format_compact
-        except ImportError:
-            print("ERROR: weighted_forecast.py not found. Run from the scripts/ directory.")
-            sys.exit(1)
-
-        forecast = produce_forecast(args.city)
-        if "error" in forecast:
-            print(f"ERROR: {forecast['error']}")
-            sys.exit(1)
-        if args.json:
-            print(json.dumps(forecast, indent=2, default=str))
-        elif args.scheduled:
-            print(format_compact(forecast))
-        else:
-            print(wf_text(forecast))
-        return
-
-    # 1. Geocode
-    location = geocode(args.city)
-    if not location:
-        print(f"Could not find city: {args.city}")
-        print("Try being more specific, e.g., 'Bratislava' or 'New York, US'")
+    try:
+        from weighted_forecast import produce_forecast, format_text as wf_text, format_compact
+    except ImportError:
+        print("ERROR: weighted_forecast.py not found. Run from the scripts/ directory.")
         sys.exit(1)
 
-    print(f"Location: {location['name']}, {location['country']} ({location['lat']}, {location['lon']})")
-    print(f"Fetching from multiple sources...\n")
-
-    lat, lon = location["lat"], location["lon"]
-
-    # 2. Fetch from all sources in parallel
-    results = []
-    with ThreadPoolExecutor(max_workers=7) as pool:
-        futures = {
-            pool.submit(fetch_open_meteo, lat, lon, location.get("timezone", "auto")): "Open-Meteo",
-            pool.submit(fetch_wttr, args.city): "wttr.in",
-            pool.submit(fetch_openweather, lat, lon): "OpenWeatherMap",
-            pool.submit(fetch_weatherapi, lat, lon): "WeatherAPI",
-            pool.submit(fetch_visual_crossing, lat, lon): "VisualCrossing",
-            pool.submit(fetch_noaa_nws, args.city, lat, lon): "NOAA_NWS",
-            pool.submit(fetch_ecmwf, lat, lon): "ECMWF",
-        }
-        for future in as_completed(futures):
-            name = futures[future]
-            try:
-                data = future.result()
-                if data:
-                    results.append(data)
-                    print(f"  [OK] {name}")
-                else:
-                    print(f"  [--] {name} (no data or no API key)")
-            except Exception as e:
-                print(f"  [!!] {name} (error: {e})")
-
-    print()
-
-    if not results:
-        print("ERROR: Could not fetch weather from any source. Check your internet connection.")
+    forecast = produce_forecast(args.city)
+    if "error" in forecast:
+        print(f"ERROR: {forecast['error']}")
         sys.exit(1)
-
-    # 2b. Optionally store forecasts in the database
-    if args.store:
-        try:
-            import db as _db
-            from db import normalize_condition as _norm
-            city = _db.get_city(location["name"])
-            if city:
-                fetched_at = datetime.now().isoformat()
-                rows = []
-                for result in results:
-                    cur = result.get("current", {})
-                    for day in result.get("daily", []):
-                        rows.append((
-                            city["id"], result["source"], fetched_at, day.get("date"),
-                            day.get("high_c"), day.get("low_c"), day.get("precip_prob"),
-                            day.get("precip_mm"), day.get("wind_max_kmh"),
-                            _norm(day.get("condition", "")),
-                            cur.get("pressure_hpa"), cur.get("humidity"),
-                            json.dumps(day),
-                        ))
-                if rows:
-                    _db.insert_forecasts_batch(rows)
-                    print(f"  Stored {len(rows)} forecast rows in database\n")
-            else:
-                print(f"  City '{location['name']}' not in database. Run add_city.py first.\n")
-        except ImportError:
-            print("  WARNING: db.py not found, --store skipped\n")
-
-    # 3. Build consensus
-    consensus = build_consensus(results)
-    market_alerts = analyze_market_weather(consensus, location)
-    advice = personal_advice(consensus)
-
-    # 4. Output
     if args.json:
-        output = {
-            "location": location,
-            "consensus": consensus,
-            "market_alerts": market_alerts,
-            "personal_advice": advice,
-            "generated_at": datetime.now().isoformat(),
-        }
-        print(json.dumps(output, indent=2))
+        print(json.dumps(forecast, indent=2, default=str))
     elif args.scheduled:
-        print(format_scheduled(consensus, location, market_alerts))
+        print(format_compact(forecast))
     else:
-        print(format_text(consensus, location, market_alerts, advice))
+        print(wf_text(forecast))
 
 
 if __name__ == "__main__":

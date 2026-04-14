@@ -151,6 +151,21 @@ def create_schema():
         CREATE INDEX IF NOT EXISTS idx_seasonal_forecasts_lookup
             ON seasonal_forecasts(city_id, target_year, target_month);
 
+        -- ================================================================
+        -- Pressure trend tracking
+        -- ================================================================
+
+        CREATE TABLE IF NOT EXISTS pressure_log (
+            city_id     INTEGER NOT NULL,
+            timestamp   TEXT NOT NULL,
+            pressure_hpa REAL NOT NULL,
+            PRIMARY KEY (city_id, timestamp),
+            FOREIGN KEY (city_id) REFERENCES cities(id) ON DELETE CASCADE
+        );
+
+        CREATE INDEX IF NOT EXISTS idx_pressure_log_lookup
+            ON pressure_log(city_id, timestamp);
+
         CREATE TABLE IF NOT EXISTS seasonal_skill (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             city_id         INTEGER NOT NULL REFERENCES cities(id),

@@ -484,50 +484,6 @@ def build_climatology(city_id, lat, lon, ref_start=None, ref_end=None):
 
 
 # ---------------------------------------------------------------------------
-# Historical weather for analog training
-# ---------------------------------------------------------------------------
-def get_historical_monthly_weather(city_id, lat, lon, year, month):
-    """Fetch actual monthly weather for a specific year/month.
-    Returns dict with temp_high_mean, temp_low_mean, precip_total, wind_max
-    or None on failure.
-    """
-    days_in_month = [31, 28 + (1 if year % 4 == 0 and (year % 100 != 0 or year % 400 == 0) else 0),
-                     31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-    last_day = days_in_month[month - 1]
-    start_date = f"{year}-{month:02d}-01"
-    end_date = f"{year}-{month:02d}-{last_day:02d}"
-
-    url = (
-        f"https://archive-api.open-meteo.com/v1/archive"
-        f"?latitude={lat}&longitude={lon}"
-        f"&start_date={start_date}&end_date={end_date}"
-        f"&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,wind_speed_10m_max"
-        f"&timezone=auto"
-    )
-
-    try:
-        text = fetch_url(url, timeout=30)
-        data = json.loads(text)
-        daily = data.get("daily", {})
-
-        t_max = [v for v in daily.get("temperature_2m_max", []) if v is not None]
-        t_min = [v for v in daily.get("temperature_2m_min", []) if v is not None]
-        precip = [v for v in daily.get("precipitation_sum", []) if v is not None]
-        wind = [v for v in daily.get("wind_speed_10m_max", []) if v is not None]
-
-        if not t_max:
-            return None
-
-        return {
-            "temp_high_mean": sum(t_max) / len(t_max),
-            "temp_low_mean": sum(t_min) / len(t_min) if t_min else None,
-            "precip_total": sum(precip) if precip else None,
-            "wind_max": max(wind) if wind else None,
-        }
-    except Exception:
-        return None
-
-
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------

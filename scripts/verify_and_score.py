@@ -13,12 +13,11 @@ Or with a specific date:
   python scripts/verify_and_score.py --date 2026-04-01
 """
 
-import json
 import logging
 import math
 import os
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, timedelta
 
 logger = logging.getLogger(__name__)
 
@@ -394,16 +393,18 @@ def recompute_weights(city_id, window_days=None):
                         weights[source][metric] = weights[source].get(metric, 0) / total_w
 
     # Ensure bias and lead_time_group columns exist in source_accuracy
+    # Wrap in try/except to handle race conditions where concurrent calls
+    # both attempt ALTER TABLE (catch "duplicate column name" errors).
     conn = db.get_connection()
-    # Check existing columns
-    cursor = conn.execute("PRAGMA table_info(source_accuracy)")
-    existing_cols = {row[1] for row in cursor.fetchall()}
-    if "bias" not in existing_cols:
-        conn.execute("ALTER TABLE source_accuracy ADD COLUMN bias REAL DEFAULT NULL")
-    if "lead_time_group" not in existing_cols:
-        conn.execute("ALTER TABLE source_accuracy ADD COLUMN lead_time_group TEXT DEFAULT NULL")
-    if "rmse" not in existing_cols:
-        conn.execute("ALTER TABLE source_accuracy ADD COLUMN rmse REAL DEFAULT NULL")
+    for col_def in [
+        "ALTER TABLE source_accuracy ADD COLUMN bias REAL DEFAULT NULL",
+        "ALTER TABLE source_accuracy ADD COLUMN lead_time_group TEXT DEFAULT NULL",
+        "ALTER TABLE source_accuracy ADD COLUMN rmse REAL DEFAULT NULL",
+    ]:
+        try:
+            conn.execute(col_def)
+        except Exception:
+            pass  # Column already exists (race condition or repeated run)
     conn.commit()
 
     # Store weights in database (overall)

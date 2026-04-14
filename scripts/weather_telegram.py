@@ -175,6 +175,11 @@ def format_city_forecast(forecast):
         if corrections:
             lines.append(f"   ⚡ {corrections[0]}")
 
+    # Sea temperature if available
+    sea = forecast.get("sea_temperature")
+    if sea and sea.get("sea_temp_c") is not None:
+        lines.append(f"🌊 Teplota mora: {sea['sea_temp_c']}°C")
+
     lines.append("")
     lines.append(f"🎯 Dôvera: {conf} ({sources} zdrojov)")
 
@@ -210,8 +215,11 @@ def format_alerts(alerts_data):
         type_emoji = {
             "extreme_heat": "🔥", "extreme_cold": "🥶",
             "heavy_precip": "🌊", "strong_wind": "💨",
+            "flood_risk": "🌊", "heat_index": "🔥",
+            "wind_chill": "🥶", "official": "📋",
         }.get(a.get("type", ""), "⚠️")
-        lines.append(f"{type_emoji} [{a['date']}] {a['city']}: {a['message']}")
+        area_info = f" ({a['areas']})" if a.get("areas") else ""
+        lines.append(f"{type_emoji} [{a['date']}] {a['city']}{area_info}: {a['message']}")
 
     return "\n".join(lines)
 

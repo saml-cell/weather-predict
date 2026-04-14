@@ -1,0 +1,23 @@
+# MOS post-processing cron entries
+#
+# Install with:
+#     crontab -l 2>/dev/null > /tmp/current_cron
+#     cat scripts/mos_cron.txt >> /tmp/current_cron
+#     crontab /tmp/current_cron
+#
+# Or add manually via: crontab -e
+#
+# All times are UTC. Adjust "WEATHER_PROJECT_DIR" to your install path.
+# -----------------------------------------------------------------------------
+
+# Daily shadow verification at 06:00 UTC — scores yesterday's MOS predictions
+# against real station observations from observations_hourly_station, writes
+# one row per (city, variable) to mos_daily_skill, and alerts (via stdout JSON
+# consumed downstream) on 3-consecutive-day regressions.
+0 6 * * * cd "/home/samko/Weather predict program" && .venv/bin/python scripts/mos_shadow_verify.py --quiet >> /home/samko/.openclaw/logs/mos_verify.log 2>&1
+
+# Weekly retrain at 03:00 UTC every Sunday — incremental 14-day backfill of
+# historical forecasts and station observations, full retrain into a staging
+# directory, compare vs production on last 30 days of shadow-verify, promote
+# only if no variable regresses (2% noise band allowed).
+0 3 * * 0 cd "/home/samko/Weather predict program" && .venv/bin/python scripts/weekly_retrain_mos.py --quiet >> /home/samko/.openclaw/logs/mos_retrain.log 2>&1

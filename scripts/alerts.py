@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import sys
+import time
 from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -21,6 +22,12 @@ import db
 from meteo import heat_index, wind_chill
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Official alerts cache (avoid repeated slow external API calls)
+# ---------------------------------------------------------------------------
+_official_alerts_cache = {}  # {city_name: (timestamp, alerts_list)}
+_OFFICIAL_ALERTS_TTL = 1800  # 30 minutes
 
 # ---------------------------------------------------------------------------
 # Alert thresholds
@@ -43,7 +50,12 @@ THRESHOLDS = {
 def get_official_alerts(city_name):
     """Fetch official weather service alerts from WeatherAPI for a city.
     Returns a list of alert dicts with type='official'.
-    Uses WeatherAPI directly instead of the full forecast pipeline."""
+    Uses WeatherAPI directly instead of the full forecast pipeline.
+    Results are cached for 30 minutes to avoid repeated slow API calls."""
+    cached = _official_alerts_cache.get(city_name)
+    if cached and (time.time() - cached[0]) < _OFFICIAL_ALERTS_TTL:
+        return cached[1]
+
     from fetch_weather import fetch_weatherapi, geocode
     try:
         loc = geocode(city_name)
@@ -54,13 +66,16 @@ def get_official_alerts(city_name):
             return []
         official = []
         for alert in result.get("alerts", []):
+            areas = alert.get("areas", "")
             official.append({
                 "city": city_name,
+                "areas": areas,
                 "date": alert.get("effective", ""),
                 "type": "official",
                 "severity": alert.get("severity"),
                 "event": alert.get("event"),
                 "headline": alert.get("headline"),
+                "title": alert.get("event") or alert.get("headline", "Weather alert"),
                 "message": alert.get("headline") or alert.get("event", "Weather alert"),
                 "expires": alert.get("expires"),
                 "urgency": alert.get("urgency"),
@@ -68,6 +83,7 @@ def get_official_alerts(city_name):
                 "instruction": alert.get("instruction"),
                 "source": "WeatherAPI",
             })
+        _official_alerts_cache[city_name] = (time.time(), official)
         return official
     except Exception as e:
         logger.warning("Failed to fetch official alerts for %s: %s", city_name, e)
@@ -198,9 +214,11 @@ def check_city_alerts(city_id, city_name):
             consec_total = 0.0
             consec_start = None
 
-    # Mark all threshold-based alerts with category "threshold"
+    # Mark all threshold-based alerts with category "threshold" and add title/description
     for alert in alerts:
         alert["category"] = "threshold"
+        alert["title"] = alert.get("type", "").replace("_", " ").title()
+        alert["description"] = alert.get("message", "")
 
     # Append official weather service alerts from WeatherAPI
     official_alerts = get_official_alerts(city_name)
