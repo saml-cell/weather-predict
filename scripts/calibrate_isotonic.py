@@ -68,6 +68,8 @@ from train_mos_quantile import (  # type: ignore
     DEFAULT_VAL_END,
     DEFAULT_TEST_END,
     FEATURE_SET_V3,
+    FEATURE_SET_V3_1,
+    attach_obs_lag_features,
     engineer_features,
     load_cities_meta,
     load_joined,
@@ -346,12 +348,13 @@ def evaluate_variable(
     train_end: str,
     val_end: str,
     test_end: str,
+    feature_set: str = FEATURE_SET_V3,
 ) -> dict:
     """Load data, run boosters, compute baseline (uncalibrated) metrics,
     fit calibrator, compute calibrated metrics, return a result dict.
     """
     logger.info("=" * 60)
-    logger.info("Variable: %s", variable)
+    logger.info("Variable: %s (feature_set=%s)", variable, feature_set)
 
     t0 = time.time()
     df = load_joined(
@@ -365,7 +368,10 @@ def evaluate_variable(
     if df.empty:
         return {"variable": variable, "error": "no_data"}
 
-    X, y, feature_cols = engineer_features(df, cities_meta=cities_meta, feature_set=FEATURE_SET_V3)
+    if feature_set == FEATURE_SET_V3_1:
+        df = attach_obs_lag_features(df, conn, target_source=target_source)
+
+    X, y, feature_cols = engineer_features(df, cities_meta=cities_meta, feature_set=feature_set)
     df_feat = df.copy()
     for col in X.columns:
         df_feat[col] = X[col]
@@ -525,6 +531,8 @@ def main():
     p.add_argument("--train-end", default=DEFAULT_TRAIN_END)
     p.add_argument("--val-end", default=DEFAULT_VAL_END)
     p.add_argument("--test-end", default=DEFAULT_TEST_END)
+    p.add_argument("--feature-set", choices=["v3", "v3.1"], default="v3",
+                   help="Feature set — must match the deployed model's metadata.json")
     p.add_argument("--dry-run", action="store_true",
                    help="Report metrics but don't save calibrators.pkl")
     p.add_argument("--variables", default=",".join(VARIABLES))
@@ -563,6 +571,7 @@ def main():
                 train_end=args.train_end,
                 val_end=args.val_end,
                 test_end=args.test_end,
+                feature_set=args.feature_set,
             )
             ir = r.pop("_calibrator", None)
             if ir is not None:

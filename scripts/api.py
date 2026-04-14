@@ -59,6 +59,22 @@ from weighted_forecast import produce_forecast
 from seasonal_forecast import produce_seasonal_forecast, format_json_output
 from climate_indices import get_current_index_state, build_climatology
 from alerts import check_city_alerts
+import mos_inference
+
+# Startup sanity check: load MOS models once at import time so a feature_set
+# mismatch (code vs. deployed metadata) fails the worker immediately instead of
+# silently serving broken forecasts. Gunicorn imports api.py per worker, so
+# this runs on every boot/restart.
+try:
+    _mos_boot_info = mos_inference.model_info()
+    logger.info(
+        "MOS boot check OK: feature_set=%s model_version=%s trained_at=%s boosters=%d",
+        _mos_boot_info["feature_set"], _mos_boot_info["model_version"],
+        _mos_boot_info["trained_at"], _mos_boot_info["booster_count"],
+    )
+except Exception as _e:
+    logger.error("MOS boot check FAILED: %s", _e)
+    raise
 
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _config_file_lock = threading.Lock()
@@ -869,6 +885,11 @@ def health_check():
     if os.path.exists(db.DB_PATH):
         db_size_mb = round(os.path.getsize(db.DB_PATH) / (1024 * 1024), 2)
 
+    try:
+        mos = mos_inference.model_info()
+    except Exception as e:
+        mos = {"error": str(e)}
+
     return jsonify({
         "status": "ok",
         "version": "1.1.0",
@@ -879,6 +900,7 @@ def health_check():
         "db_size_mb": db_size_mb,
         "cache_entries": len(_forecast_cache),
         "auth_enabled": bool(_API_KEY),
+        "mos": mos,
     })
 
 # ---------------------------------------------------------------------------

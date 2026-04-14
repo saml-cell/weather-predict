@@ -79,6 +79,8 @@ from train_mos_quantile import (  # type: ignore
     DEFAULT_VAL_END,
     DEFAULT_TEST_END,
     FEATURE_SET_V3,
+    FEATURE_SET_V3_1,
+    attach_obs_lag_features,
     engineer_features,
     load_cities_meta,
     load_joined,
@@ -295,11 +297,12 @@ def run_hurdle(
     val_end: str,
     test_end: str,
     dry_run: bool = False,
+    feature_set: str = FEATURE_SET_V3,
 ) -> dict:
     t0 = time.time()
 
-    # ---- Load joined precip data (v3 features) ----
-    logger.info("Loading joined precip data with v3 features…")
+    # ---- Load joined precip data ----
+    logger.info("Loading joined precip data (feature_set=%s)…", feature_set)
     df = load_joined(
         conn,
         variable="precip_mm",
@@ -312,7 +315,10 @@ def run_hurdle(
         return {"error": "no_data"}
     logger.info("joined rows: %d", len(df))
 
-    X, y, feature_cols = engineer_features(df, cities_meta=cities_meta, feature_set=FEATURE_SET_V3)
+    if feature_set == FEATURE_SET_V3_1:
+        df = attach_obs_lag_features(df, conn, target_source="station")
+
+    X, y, feature_cols = engineer_features(df, cities_meta=cities_meta, feature_set=feature_set)
     df_feat = df.copy()
     for col in X.columns:
         df_feat[col] = X[col]
@@ -577,6 +583,8 @@ def main():
     p.add_argument("--train-end", default=DEFAULT_TRAIN_END)
     p.add_argument("--val-end", default=DEFAULT_VAL_END)
     p.add_argument("--test-end", default=DEFAULT_TEST_END)
+    p.add_argument("--feature-set", choices=["v3", "v3.1"], default="v3",
+                   help="Feature set — must match the deployed quantile model")
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--quiet", action="store_true")
     args = p.parse_args()
@@ -598,6 +606,7 @@ def main():
         val_end=args.val_end,
         test_end=args.test_end,
         dry_run=args.dry_run,
+        feature_set=args.feature_set,
     )
 
     report_path = os.path.join(args.output_dir, "hurdle_report.json")

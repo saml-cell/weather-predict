@@ -26,9 +26,18 @@ import db
 from db import normalize_condition
 from fetch_weather import (
     geocode, fetch_open_meteo, fetch_wttr, fetch_openweather, fetch_weatherapi,
-    fetch_visual_crossing, fetch_noaa_nws, fetch_ecmwf, WMO_CODES, c_to_f
+    fetch_visual_crossing, fetch_noaa_nws, fetch_ecmwf, fetch_sea_temperature,
+    c_to_f
 )
 from meteo import apply_physics_corrections, dew_point, dew_point_depression, feels_like
+
+# MOS inference — optional; failure here must not break the rest of the forecast
+try:
+    import mos_inference as _mos
+    _MOS_AVAILABLE = True
+except Exception as _mos_import_err:
+    _MOS_AVAILABLE = False
+    _mos = None
 
 
 # ---------------------------------------------------------------------------
@@ -99,24 +108,54 @@ def compute_confidence(spread, weight_data, num_sources):
 # ---------------------------------------------------------------------------
 # Fetch fresh data from all sources
 # ---------------------------------------------------------------------------
+def _allowed_sources_for(city_name):
+    """Return the set of source names that should be fetched for this city.
+
+    Tier-1 cities get all configured sources (costly APIs included).
+    Tier-2 cities get only the lightweight free set (tier_2_sources in config).
+    If no tiering is configured, returns None → fetch everything (legacy behavior).
+    """
+    try:
+        cfg = db.load_config()
+    except Exception:
+        return None
+    tier_1 = {c.lower() for c in cfg.get("tier_1_cities", [])}
+    tier_2 = {c.lower() for c in cfg.get("tier_2_cities", [])}
+    if not tier_1 and not tier_2:
+        return None
+    if city_name and city_name.lower() in tier_1:
+        return set(cfg.get("tier_1_sources", [])) or None
+    return set(cfg.get("tier_2_sources", ["Open-Meteo", "wttr.in", "WeatherAPI"]))
+
+
 def fetch_all_sources(city):
-    """Fetch from all available sources in parallel."""
+    """Fetch from all available sources in parallel, filtered by tier."""
     lat, lon = city["lat"], city["lon"]
     tz = city.get("timezone", "auto")
     name = city["name"]
 
+    all_sources = {
+        "Open-Meteo":     (fetch_open_meteo,     (lat, lon, tz)),
+        "wttr.in":        (fetch_wttr,           (name,)),
+        "OpenWeatherMap": (fetch_openweather,    (lat, lon)),
+        "WeatherAPI":     (fetch_weatherapi,     (lat, lon)),
+        "VisualCrossing": (fetch_visual_crossing,(lat, lon)),
+        "NOAA_NWS":       (fetch_noaa_nws,       (name, lat, lon)),
+        "ECMWF":          (fetch_ecmwf,          (lat, lon)),
+    }
+
+    allowed = _allowed_sources_for(name)
+    if allowed is not None:
+        all_sources = {k: v for k, v in all_sources.items() if k in allowed}
+
     results = []
     source_status = {}
-    with ThreadPoolExecutor(max_workers=7) as pool:
-        futures = {
-            pool.submit(fetch_open_meteo, lat, lon, tz): "Open-Meteo",
-            pool.submit(fetch_wttr, name): "wttr.in",
-            pool.submit(fetch_openweather, lat, lon): "OpenWeatherMap",
-            pool.submit(fetch_weatherapi, lat, lon): "WeatherAPI",
-            pool.submit(fetch_visual_crossing, lat, lon): "VisualCrossing",
-            pool.submit(fetch_noaa_nws, name, lat, lon): "NOAA_NWS",
-            pool.submit(fetch_ecmwf, lat, lon): "ECMWF",
-        }
+    if not all_sources:
+        return results, source_status
+
+    with ThreadPoolExecutor(max_workers=max(1, len(all_sources))) as pool:
+        futures = {pool.submit(fn, *args): src_name
+                   for src_name, (fn, args) in all_sources.items()}
         for future in as_completed(futures):
             source = futures[future]
             try:
@@ -205,6 +244,14 @@ def produce_forecast(city_name):
         "conditions": [r["current"]["condition"] for r in results if r["current"].get("condition")],
         "temp_spread_c": round(temp_spread, 1),
     }
+
+    # Log pressure for trend tracking
+    city_id = city.get("id")
+    if city_id and current.get("pressure_hpa"):
+        db.log_pressure(city_id, current["pressure_hpa"])
+
+    # Retrieve pressure trend for physics corrections
+    pressure_trend = db.get_pressure_trend(city_id) if city_id else None
 
     # AQI data (pass through from WeatherAPI if available)
     for r in results:
@@ -296,6 +343,7 @@ def produce_forecast(city_name):
             humidity_pct=avg_humidity,
             temp_c=day_data["weighted_high_c"],
             wind_kmh=day_data["weighted_wind_kmh"],
+            pressure_trend=pressure_trend,
             apply_cc=False,
         )
         day_data["adjusted_precip_prob"] = adjusted.get("precip_prob", day_data["weighted_precip_prob"])
@@ -374,6 +422,73 @@ def produce_forecast(city_name):
             weatherapi_alerts = r["alerts"]
             break
 
+    # --- Sea surface temperature (coastal cities only) ---
+    sea_data = fetch_sea_temperature(city["lat"], city["lon"])
+
+    # --- MOS quantile post-processing layer ---
+    # Station-target MOS beats ensemble mean by 10-27% on every variable
+    # (see wiki: weather-predict-session-state.md). This section fetches the
+    # same 4 source models the MOS was trained on (gfs_global, icon_seamless,
+    # jma_seamless, ecmwf_ifs025) from Open-Meteo's multi-model endpoint and
+    # produces calibrated p10/p50/p90 per variable per hour, then aggregates
+    # to daily max/min/sum. Failure is non-fatal — the rest of the forecast
+    # still returns.
+    mos_summary = None
+    if _MOS_AVAILABLE and city.get("id"):
+        try:
+            mos_result = _mos.predict_for_city(
+                {"id": city["id"], "lat": city["lat"], "lon": city["lon"], "name": city["name"]},
+                forecast_days=7,
+            )
+            if mos_result.get("models_loaded") and mos_result.get("daily_by_date"):
+                # Attach per-day MOS quantiles to each daily entry
+                daily_by_date = mos_result["daily_by_date"]
+                for day_data in daily_forecast:
+                    mos_day = daily_by_date.get(day_data["date"])
+                    if mos_day:
+                        day_data["mos"] = {
+                            "temp_high_p10": mos_day.get("temp_high_p10"),
+                            "temp_high_p50": mos_day.get("temp_high_p50"),
+                            "temp_high_p90": mos_day.get("temp_high_p90"),
+                            "temp_low_p10": mos_day.get("temp_low_p10"),
+                            "temp_low_p50": mos_day.get("temp_low_p50"),
+                            "temp_low_p90": mos_day.get("temp_low_p90"),
+                            "precip_mm_p10": mos_day.get("precip_mm_sum_p10"),
+                            "precip_mm_p50": mos_day.get("precip_mm_sum_p50"),
+                            "precip_mm_p90": mos_day.get("precip_mm_sum_p90"),
+                            "wind_max_kmh_p10": mos_day.get("wind_max_kmh_p10"),
+                            "wind_max_kmh_p50": mos_day.get("wind_max_kmh_p50"),
+                            "wind_max_kmh_p90": mos_day.get("wind_max_kmh_p90"),
+                            "humidity_p10": mos_day.get("humidity_mean_p10"),
+                            "humidity_p50": mos_day.get("humidity_mean_p50"),
+                            "humidity_p90": mos_day.get("humidity_mean_p90"),
+                            "n_hours": mos_day.get("n_hours"),
+                        }
+                try:
+                    _info = _mos.model_info()
+                except Exception:
+                    _info = {}
+                mos_summary = {
+                    "available": True,
+                    "hours_predicted": mos_result.get("hours_predicted", 0),
+                    "days_predicted": len(daily_by_date),
+                    "generated_at": mos_result.get("generated_at"),
+                    "feature_set": _info.get("feature_set"),
+                    "model_version": _info.get("model_version"),
+                    "trained_at": _info.get("trained_at"),
+                }
+            else:
+                mos_summary = {
+                    "available": False,
+                    "reason": mos_result.get("error", "models not available or no data"),
+                }
+        except Exception as e:
+            import logging as _lg
+            _lg.getLogger(__name__).warning("MOS inference failed: %s", e)
+            mos_summary = {"available": False, "reason": f"exception: {e}"}
+    else:
+        mos_summary = {"available": False, "reason": "MOS module not imported or no city id"}
+
     return {
         "location": {
             "name": city["name"],
@@ -386,9 +501,11 @@ def produce_forecast(city_name):
         "hourly": hourly_forecast,
         "alerts": weatherapi_alerts,
         "ensemble_available": ensemble_data is not None,
+        "mos": mos_summary,
         "sources_used": sources_used,
         "source_status": source_status,
         "source_accuracy": source_info,
+        "sea_temperature": sea_data,
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 

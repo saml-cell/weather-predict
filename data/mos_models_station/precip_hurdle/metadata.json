@@ -1,5 +1,5 @@
 {
-  "trained_at": "2026-04-14T07:12:44Z",
+  "trained_at": "2026-04-14T16:19:25Z",
   "epsilon": 0.1,
   "feature_cols": [
     "src_ecmwf_ifs025",
@@ -40,7 +40,24 @@
     "aux_cloud_cover_pct_std",
     "aux_wind_dir_sin_mean",
     "aux_wind_dir_cos_mean",
-    "pressure_tendency_3h_hpa"
+    "pressure_tendency_3h_hpa",
+    "obs_lag_24h_temp_c",
+    "obs_lag_24h_humidity_pct",
+    "obs_lag_24h_wind_speed_kmh",
+    "obs_lag_24h_precip_mm",
+    "obs_lag_48h_temp_c",
+    "obs_lag_48h_humidity_pct",
+    "obs_lag_48h_wind_speed_kmh",
+    "obs_lag_48h_precip_mm",
+    "obs_lag_168h_temp_c",
+    "obs_lag_168h_humidity_pct",
+    "obs_lag_168h_wind_speed_kmh",
+    "obs_lag_168h_precip_mm",
+    "obs_diff_24h_temp_c",
+    "obs_diff_24h_humidity_pct",
+    "obs_diff_24h_wind_speed_kmh",
+    "td_margin",
+    "saturation_deficit_pct"
   ],
   "categorical": [
     "month",
@@ -49,41 +66,41 @@
     "climate_band"
   ],
   "stage1": {
-    "brier_val": 0.04853757852664828,
-    "brier_test": 0.046359648501133464,
-    "best_iter": 223
+    "brier_val": 0.048475970948524676,
+    "brier_test": 0.046346608054383114,
+    "best_iter": 448
   },
   "stage2": {
     "conditional_val": {
       "pinball": {
-        "q10": 0.0852204811123535,
-        "q50": 0.3242262321968931,
-        "q90": 0.26439889666217187
+        "q10": 0.08531921012821073,
+        "q50": 0.3242882415661122,
+        "q90": 0.2660917774772061
       },
-      "coverage_80": 0.6923737455052863,
-      "crps_proxy": 0.4492304066476123
+      "coverage_80": 0.6908710352600226,
+      "crps_proxy": 0.45046615278101926
     },
     "best_iters": {
-      "0.1": 74,
-      "0.5": 185,
-      "0.9": 172
+      "0.1": 95,
+      "0.5": 227,
+      "0.9": 148
     }
   },
   "joint_test": {
-    "crps": 0.06117894139701676,
-    "cov80": 0.9668898382093356,
+    "crps": 0.061272981149747725,
+    "cov80": 0.9668428364023772,
     "pinball": {
-      "q10": 0.010268337025168491,
-      "q50": 0.04158096447489743,
-      "q90": 0.039919110595459224
+      "q10": 0.010249268687330173,
+      "q50": 0.04160799780728937,
+      "q90": 0.04005220523000205
     },
-    "median_mae": 0.08316192894979486,
-    "median_rmse": 0.4616592400914393
+    "median_mae": 0.08321599561457874,
+    "median_rmse": 0.4612590135250575
   },
   "baseline_precip_mos": {
-    "crps": 0.061541470495910744,
-    "cov80": 0.9577767100824098,
-    "median_mae": 0.08397681315501648
+    "crps": null,
+    "cov80": null,
+    "median_mae": null
   },
   "accepted": true
 }

@@ -198,6 +198,66 @@ cmd_pipeline() {
     $PYTHON scripts/orchestrate.py --step all
 }
 
+# ---------------------------------------------------------------------------
+# MOS (Model Output Statistics) — LightGBM quantile regression layer
+# ---------------------------------------------------------------------------
+_MOS_PY="$PROJECT_DIR/.venv/bin/python"
+
+cmd_mos_train() {
+    info "Training MOS quantile models against station targets..."
+    load_env
+    cd "$PROJECT_DIR"
+    if [[ ! -x "$_MOS_PY" ]]; then
+        fail "Project venv missing at $_MOS_PY"
+        fail "Run: python3 -m venv .venv && .venv/bin/pip install -r requirements.txt"
+        return 1
+    fi
+    "$_MOS_PY" scripts/train_mos_quantile.py --target-source station
+}
+
+cmd_mos_predict() {
+    local city_id="${1:-1}"
+    info "Running MOS inference for city_id=$city_id..."
+    load_env
+    cd "$PROJECT_DIR"
+    "$_MOS_PY" scripts/mos_inference.py --city-id "$city_id"
+}
+
+cmd_mos_verify() {
+    info "Running MOS shadow verification for yesterday..."
+    load_env
+    cd "$PROJECT_DIR"
+    "$_MOS_PY" scripts/mos_shadow_verify.py "$@"
+}
+
+cmd_mos_retrain() {
+    info "Running weekly MOS retrain with auto-rollback..."
+    load_env
+    cd "$PROJECT_DIR"
+    "$_MOS_PY" scripts/weekly_retrain_mos.py "$@"
+}
+
+cmd_mos_status() {
+    info "MOS status"
+    cd "$PROJECT_DIR"
+    if [[ -f data/mos_models_station/eval_summary.txt ]]; then
+        cat data/mos_models_station/eval_summary.txt
+    else
+        fail "No MOS models deployed yet. Run: weather-ctl mos-train"
+    fi
+}
+
+cmd_ntfy_test() {
+    info "Sending ntfy test alert..."
+    load_env
+    cd "$PROJECT_DIR"
+    "$_MOS_PY" scripts/ntfy_alert.py \
+        --title "weather-ctl ntfy-test" \
+        --message "Manual test from weather-ctl at $(date -u +'%Y-%m-%d %H:%M UTC'). If you see this on your phone, subscriptions work." \
+        --priority default \
+        --tags "test,robot_face"
+}
+
 cmd_setup() {
     echo -e "${BOLD}Weather System Setup${NC}"
     echo ""
@@ -398,7 +458,7 @@ print(f'  Last fetch: {h[\"last_fetch\"]}')
     echo ""
     echo -e "${BOLD}[Recent Errors (last 24h)]${NC}"
     local err_count
-    err_count=$(journalctl --user -u "$SERVICE" --since "24 hours ago" --no-pager 2>/dev/null | grep -ciE "error|exception|traceback|fail" || echo 0)
+    err_count=$(journalctl --user -u "$SERVICE" --since "24 hours ago" --no-pager 2>/dev/null | grep -ciE "error|exception|traceback|fail") || err_count=0
     if [[ "$err_count" -gt 0 ]]; then
         warn "$err_count error lines in API logs"
         journalctl --user -u "$SERVICE" --since "24 hours ago" --no-pager 2>/dev/null | grep -iE "error|exception|traceback|fail" | tail -5 | while read -r line; do
@@ -412,7 +472,8 @@ print(f'  Last fetch: {h[\"last_fetch\"]}')
     for logfile in "$HOME/.openclaw/logs"/weather-*.log; do
         [[ -f "$logfile" ]] || continue
         local recent_errs
-        recent_errs=$(find "$logfile" -mtime -1 -exec grep -ciE "error|exception|traceback|fail" {} \; 2>/dev/null || echo 0)
+        recent_errs=$(find "$logfile" -mtime -1 -exec grep -ciE "error|exception|traceback|fail" {} \; 2>/dev/null) || recent_errs=0
+        [[ -z "$recent_errs" ]] && recent_errs=0
         if [[ "$recent_errs" -gt 0 ]]; then
             warn "$(basename "$logfile"): $recent_errs error lines"
             cron_errors=$((cron_errors + recent_errs))
@@ -494,6 +555,14 @@ cmd_help() {
     echo "  url             Show access URLs (quick copy-paste)"
     echo "  tunnel-start    Start Cloudflare tunnel"
     echo "  tunnel-stop     Stop Cloudflare tunnel"
+    echo ""
+    echo -e "${BOLD}MOS (Phase 1 — station-target quantile regression):${NC}"
+    echo "  mos-train            Train/refresh MOS models (one-shot, ~3 min)"
+    echo "  mos-predict [N]      Inference for city_id N (default 1 = Bratislava)"
+    echo "  mos-verify [args]    Daily shadow verification against station obs"
+    echo "  mos-retrain [args]   Weekly retrain with auto-rollback guard"
+    echo "  mos-status           Show deployed models' last eval summary"
+    echo "  ntfy-test            Send a test push notification to your ntfy topic"
 }
 
 # ---------------------------------------------------------------------------
@@ -516,6 +585,12 @@ case "${1:-help}" in
     url)          cmd_url ;;
     tunnel-start) cmd_tunnel_start ;;
     tunnel-stop)  cmd_tunnel_stop ;;
+    mos-train)    cmd_mos_train ;;
+    mos-predict)  cmd_mos_predict "${2:-1}" ;;
+    mos-verify)   shift; cmd_mos_verify "$@" ;;
+    mos-retrain)  shift; cmd_mos_retrain "$@" ;;
+    mos-status)   cmd_mos_status ;;
+    ntfy-test)    cmd_ntfy_test ;;
     help|--help|-h) cmd_help ;;
     *)
         echo "Unknown command: $1"

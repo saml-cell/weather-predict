@@ -92,6 +92,13 @@ MOS_SOURCES = ["gfs_global", "icon_seamless", "jma_seamless", "ecmwf_ifs025"]
 FEATURE_SET_V1 = "v1"
 FEATURE_SET_V2 = "v2"
 FEATURE_SET_V3 = "v3"
+FEATURE_SET_V3_1 = "v3.1"
+
+# Round 4.5 v3.1 lag feature definitions — must stay in sync with
+# train_mos_quantile.attach_obs_lag_features.
+LAG_HOURS = (24, 48, 168)
+LAG_VARS = ("temp_c", "humidity_pct", "wind_speed_kmh", "precip_mm")
+DIFF_VARS = ("temp_c", "humidity_pct", "wind_speed_kmh")
 
 # Map training variable name → Open-Meteo hourly parameter
 OM_PARAMETER = {
@@ -127,9 +134,16 @@ FEATURE_COLS_V3 = FEATURE_COLS_V2 + [
     "aux_wind_dir_sin_mean", "aux_wind_dir_cos_mean",
     "pressure_tendency_3h_hpa",
 ]
+FEATURE_COLS_V3_1 = (
+    FEATURE_COLS_V3
+    + [f"obs_lag_{h}h_{v}" for h in LAG_HOURS for v in LAG_VARS]
+    + [f"obs_diff_24h_{v}" for v in DIFF_VARS]
+    + ["td_margin", "saturation_deficit_pct"]
+)
 CATEGORICAL_COLS_V1 = ["month", "city_id"]
 CATEGORICAL_COLS_V2 = CATEGORICAL_COLS_V1 + ["hemisphere_ns", "climate_band"]
 CATEGORICAL_COLS_V3 = CATEGORICAL_COLS_V2
+CATEGORICAL_COLS_V3_1 = CATEGORICAL_COLS_V3
 
 # Defaults
 DEFAULT_MODELS_DIR = os.path.join(
@@ -164,20 +178,56 @@ _hurdle_cache: dict = {}
 _hurdle_cache_lock = threading.Lock()
 
 
-def _read_feature_set(models_dir: str) -> str:
-    """Read the feature_set recorded in any of the variable metadata files.
-    Defaults to v1 if not present (backwards compatible with old models).
+_FEATURE_COLS_BY_SET = {
+    FEATURE_SET_V1: FEATURE_COLS_V1,
+    FEATURE_SET_V2: FEATURE_COLS_V2,
+    FEATURE_SET_V3: FEATURE_COLS_V3,
+    FEATURE_SET_V3_1: FEATURE_COLS_V3_1,
+}
+
+
+def _read_metadata(models_dir: str) -> dict:
+    """Read the first available per-variable metadata.json.
+    Returns {} if none found; callers default sensibly.
     """
     for v in VARIABLES:
         meta_path = os.path.join(models_dir, v, "metadata.json")
         if os.path.exists(meta_path):
             try:
                 with open(meta_path) as f:
-                    meta = json.load(f)
-                return meta.get("feature_set", FEATURE_SET_V1)
+                    return json.load(f)
             except Exception:
                 pass
-    return FEATURE_SET_V1
+    return {}
+
+
+def _assert_deployment_consistent(models_dir: str, meta: dict) -> None:
+    """Guard against the v3.1-class bug: metadata declares a feature_set that
+    the inference-side FEATURE_COLS constant doesn't know about, or the set of
+    columns in metadata diverges from the constant. Raises RuntimeError on
+    mismatch so weather-api refuses to serve broken forecasts on boot.
+    """
+    feature_set = meta.get("feature_set", FEATURE_SET_V1)
+    expected = _FEATURE_COLS_BY_SET.get(feature_set)
+    if expected is None:
+        raise RuntimeError(
+            f"MOS deployment at {models_dir} declares feature_set={feature_set!r} "
+            f"which is unknown to mos_inference. Known sets: "
+            f"{sorted(_FEATURE_COLS_BY_SET)}."
+        )
+    declared = meta.get("feature_cols")
+    if declared is None:
+        return  # pre-v3 metadata did not record feature_cols
+    expected_set = set(expected)
+    declared_set = set(declared)
+    if expected_set != declared_set:
+        missing_in_code = sorted(declared_set - expected_set)
+        extra_in_code = sorted(expected_set - declared_set)
+        raise RuntimeError(
+            f"MOS deployment mismatch at {models_dir} (feature_set={feature_set}): "
+            f"metadata has columns missing from FEATURE_COLS_{feature_set.upper().replace('.', '_')}: "
+            f"{missing_in_code}; code has columns missing from metadata: {extra_in_code}."
+        )
 
 
 def load_models(models_dir: str = DEFAULT_MODELS_DIR) -> dict:
@@ -203,14 +253,18 @@ def load_models(models_dir: str = DEFAULT_MODELS_DIR) -> dict:
             logger.warning(
                 "MOS models missing (%d files): %s", len(missing), missing[:3]
             )
+        meta = _read_metadata(models_dir)
+        _assert_deployment_consistent(models_dir, meta)
         _booster_cache = {
             "_dir": models_dir,
             "_models": models,
-            "_feature_set": _read_feature_set(models_dir),
+            "_feature_set": meta.get("feature_set", FEATURE_SET_V1),
+            "_trained_at": meta.get("trained_at"),
         }
         logger.debug(
-            "Loaded %d MOS boosters from %s (feature_set=%s)",
-            len(models), models_dir, _booster_cache["_feature_set"],
+            "Loaded %d MOS boosters from %s (feature_set=%s, trained_at=%s)",
+            len(models), models_dir,
+            _booster_cache["_feature_set"], _booster_cache["_trained_at"],
         )
         return models
 
@@ -219,6 +273,20 @@ def feature_set_for(models_dir: str = DEFAULT_MODELS_DIR) -> str:
     """Return the feature_set the deployed models were trained with."""
     load_models(models_dir)  # populates cache
     return _booster_cache.get("_feature_set", FEATURE_SET_V1)
+
+
+def model_info(models_dir: str = DEFAULT_MODELS_DIR) -> dict:
+    """Provenance about the currently-deployed MOS models, for /api/health
+    and /api/forecast. Side-effect: loads models (cached)."""
+    load_models(models_dir)
+    loaded = _booster_cache.get("_models") or {}
+    return {
+        "feature_set": _booster_cache.get("_feature_set"),
+        "model_version": os.path.basename(models_dir.rstrip(os.sep)),
+        "trained_at": _booster_cache.get("_trained_at"),
+        "booster_count": len(loaded),
+        "variables": sorted({k[0] for k in loaded.keys()}),
+    }
 
 
 def _load_cities_meta() -> dict:
@@ -236,6 +304,73 @@ def _load_cities_meta() -> dict:
         except Exception as e:
             logger.warning("failed to load cities meta: %s", e)
         return _cities_meta_cache
+
+
+def _attach_obs_lag_features(
+    wide: pd.DataFrame,
+    city_id: int,
+) -> pd.DataFrame:
+    """Round 4.5 v3.1: attach `obs_lag_{h}h_{var}` columns to the inference
+    feature frame. Mirrors train_mos_quantile.attach_obs_lag_features but
+    works against an index of valid_time (strings) for a single city.
+
+    The leading edge of the forecast window (the first ~24h) may have NaN
+    lags when the observation feed has not caught up. LightGBM handles NaN
+    natively, so we just fill with NaN.
+    """
+    if wide.empty:
+        for h in LAG_HOURS:
+            for v in LAG_VARS:
+                wide[f"obs_lag_{h}h_{v}"] = np.nan
+        return wide
+
+    vt_index = pd.to_datetime(wide.index, utc=True)
+    min_needed = vt_index.min() - pd.Timedelta(hours=max(LAG_HOURS))
+    max_needed = vt_index.max() - pd.Timedelta(hours=min(LAG_HOURS))
+
+    try:
+        conn = get_connection()
+        obs_df = pd.read_sql_query(
+            """
+            SELECT valid_time, temp_c, humidity_pct, wind_speed_kmh, precip_mm
+            FROM observations_hourly_station
+            WHERE city_id = ?
+              AND valid_time >= ?
+              AND valid_time <= ?
+            """,
+            conn,
+            params=(
+                int(city_id),
+                min_needed.isoformat(),
+                max_needed.isoformat(),
+            ),
+        )
+    except Exception as exc:
+        logger.warning("obs_lag fetch failed for city %s: %s", city_id, exc)
+        obs_df = pd.DataFrame(columns=["valid_time", *LAG_VARS])
+
+    if obs_df.empty:
+        for h in LAG_HOURS:
+            for v in LAG_VARS:
+                wide[f"obs_lag_{h}h_{v}"] = np.nan
+        return wide
+
+    obs_df["vt_dt"] = pd.to_datetime(obs_df["valid_time"], utc=True)
+
+    for h in LAG_HOURS:
+        shifted = obs_df.copy()
+        shifted["vt_dt"] = shifted["vt_dt"] + pd.Timedelta(hours=h)
+        shifted = shifted.drop_duplicates(subset="vt_dt", keep="last")
+        shifted = shifted.set_index("vt_dt")
+        for v in LAG_VARS:
+            col = f"obs_lag_{h}h_{v}"
+            # Cast to float explicitly — when all obs in the window are NULL
+            # (dry regions with no precip reporting) the reindex result is
+            # object-dtype, which LightGBM rejects.
+            vals = shifted[v].reindex(vt_index).to_numpy(dtype=float)
+            wide[col] = vals
+
+    return wide
 
 
 def models_available(models_dir: str = DEFAULT_MODELS_DIR) -> bool:
@@ -536,7 +671,9 @@ def engineer_features(
     feature_set must match the value in the trained model's metadata.json.
     The caller (predict_hourly) passes it through from _read_feature_set().
     """
-    if feature_set == FEATURE_SET_V3:
+    if feature_set == FEATURE_SET_V3_1:
+        feature_cols = FEATURE_COLS_V3_1
+    elif feature_set == FEATURE_SET_V3:
         feature_cols = FEATURE_COLS_V3
     elif feature_set == FEATURE_SET_V2:
         feature_cols = FEATURE_COLS_V2
@@ -577,7 +714,7 @@ def engineer_features(
     wide["year"] = idx.year.astype("int32")
     wide["city_id"] = int(city_id)
 
-    if feature_set in (FEATURE_SET_V2, FEATURE_SET_V3):
+    if feature_set in (FEATURE_SET_V2, FEATURE_SET_V3, FEATURE_SET_V3_1):
         # Climate-zone features from cities meta
         meta = _load_cities_meta().get(int(city_id), {})
         lat = meta.get("lat")
@@ -595,21 +732,21 @@ def engineer_features(
         # For v3 we additionally need dew_point, pressure, cloud cover and
         # the std of all of them, plus circular wind direction.
         aux_needed = ["temp_c", "humidity_pct"]
-        if feature_set == FEATURE_SET_V3:
+        if feature_set in (FEATURE_SET_V3, FEATURE_SET_V3_1):
             aux_needed += ["dew_point_c", "pressure_msl_hpa", "cloud_cover_pct"]
 
         aux_means = {}
         for aux_var in aux_needed:
             if aux_var not in long_df.columns:
                 aux_means[aux_var] = pd.Series(np.nan, index=wide.index)
-                if feature_set == FEATURE_SET_V3:
+                if feature_set in (FEATURE_SET_V3, FEATURE_SET_V3_1):
                     wide[f"aux_{aux_var}_mean"] = np.nan
                     wide[f"aux_{aux_var}_std"] = np.nan
                 continue
             sub = long_df[["valid_time", "source", aux_var]].dropna(subset=[aux_var])
             if sub.empty:
                 aux_means[aux_var] = pd.Series(np.nan, index=wide.index)
-                if feature_set == FEATURE_SET_V3:
+                if feature_set in (FEATURE_SET_V3, FEATURE_SET_V3_1):
                     wide[f"aux_{aux_var}_mean"] = np.nan
                     wide[f"aux_{aux_var}_std"] = np.nan
                 continue
@@ -618,7 +755,7 @@ def engineer_features(
             )
             aux_mean_series = aux_wide.mean(axis=1, skipna=True)
             aux_means[aux_var] = aux_mean_series
-            if feature_set == FEATURE_SET_V3:
+            if feature_set in (FEATURE_SET_V3, FEATURE_SET_V3_1):
                 wide[f"aux_{aux_var}_mean"] = aux_mean_series.reindex(wide.index)
                 wide[f"aux_{aux_var}_std"] = (
                     aux_wide.std(axis=1, skipna=True, ddof=0).reindex(wide.index)
@@ -633,7 +770,7 @@ def engineer_features(
         wide["specific_humidity_gkg"] = 0.622 * e_s / (1013.25 - e_s) * 1000.0
         wide["lcl_height_m"] = 125.0 * (T - Td)
 
-        if feature_set == FEATURE_SET_V3:
+        if feature_set in (FEATURE_SET_V3, FEATURE_SET_V3_1):
             # Wind direction (circular) — convert to sin/cos per source, then
             # average across sources to get a stable circular mean.
             wd_sub = long_df[["valid_time", "source", "wind_dir_deg"]].dropna(
@@ -666,6 +803,23 @@ def engineer_features(
             wide["pressure_tendency_3h_hpa"] = (
                 wide_sorted["aux_pressure_msl_hpa_mean"].diff(3).reindex(wide.index)
             )
+
+    if feature_set == FEATURE_SET_V3_1:
+        # Round 4.5: obs lag features + rate-of-change diffs + physics
+        # composites. Matches train_mos_quantile.engineer_features v3.1 branch.
+        _attach_obs_lag_features(wide, city_id)
+        for v in DIFF_VARS:
+            wide[f"obs_diff_24h_{v}"] = (
+                wide[f"obs_lag_24h_{v}"] - wide[f"obs_lag_48h_{v}"]
+            )
+        wide["td_margin"] = (
+            wide.get("aux_temp_c_mean", pd.Series(np.nan, index=wide.index))
+            - wide.get("aux_dew_point_c_mean", pd.Series(np.nan, index=wide.index))
+        )
+        wide["saturation_deficit_pct"] = (
+            100.0
+            - wide.get("aux_humidity_pct_mean", pd.Series(np.nan, index=wide.index))
+        )
 
     return wide[feature_cols]
 

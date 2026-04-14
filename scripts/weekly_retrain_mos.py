@@ -85,6 +85,17 @@ def step_incremental_backfill(window_days: int = 14, dry_run: bool = False) -> b
     return True
 
 
+def _deployed_feature_set() -> str:
+    """Read feature_set from the currently-deployed model metadata so the
+    retrain stays consistent with whatever is in production. Falls back to v3
+    if metadata is missing or unreadable."""
+    try:
+        fset = mos.feature_set_for(PROD_DIR)
+        return fset or "v3"
+    except Exception:
+        return "v3"
+
+
 def step_retrain_staging(dry_run: bool = False) -> bool:
     """Run the trainer targeting the staging directory."""
     if dry_run:
@@ -92,10 +103,13 @@ def step_retrain_staging(dry_run: bool = False) -> bool:
         return True
     if os.path.exists(STAGING_DIR):
         shutil.rmtree(STAGING_DIR)
+    fset = _deployed_feature_set()
+    logger.info("retraining with feature_set=%s (matches deployed)", fset)
     rc = run([
         _VENV_PY, "scripts/train_mos_quantile.py",
         "--target-source", "station",
         "--output-dir", STAGING_DIR,
+        "--feature-set", fset,
     ])
     return rc == 0
 
@@ -221,9 +235,11 @@ def step_refit_calibrators(dry_run: bool = False) -> bool:
     if dry_run:
         logger.info("[dry-run] skipping calibrator refit")
         return True
+    fset = _deployed_feature_set()
     rc = run([
         _VENV_PY, "scripts/calibrate_isotonic.py",
         "--target-source", "station",
+        "--feature-set", fset,
         "--quiet",
     ])
     if rc != 0:
@@ -242,8 +258,10 @@ def step_refit_hurdle(dry_run: bool = False) -> bool:
     if dry_run:
         logger.info("[dry-run] skipping hurdle refit")
         return True
+    fset = _deployed_feature_set()
     rc = run([
         _VENV_PY, "scripts/train_mos_hurdle.py",
+        "--feature-set", fset,
         "--quiet",
     ])
     if rc != 0:
