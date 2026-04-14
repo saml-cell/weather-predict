@@ -580,6 +580,16 @@ def main():
     # raw predictions for them. This is the principled way to handle Step 2's
     # zero-inflated precip edge case (Henri explicitly flagged it needs a
     # hurdle model in Step 5 — negative isotonic result on precip is expected).
+    #
+    # Council Round 4 Step 2 (2026-04-14): `temp_c` is ALSO pinned to rejected,
+    # regardless of test-set gate, because the first calibrator-aware
+    # production verify day (2026-04-13) showed the temp calibrator moving
+    # the wrong way on BOTH CRPS (+9.2%) and cov80 (−0.059). The 2024-val-fit
+    # isotonic for temp_c does not transfer to production — until we refit
+    # on production data (Round 4 Step 4, blocked until ~2026-04-20), temp
+    # stays uncalibrated.
+    PRODUCTION_REJECTED_VARIABLES = {"temp_c"}
+
     accepted = []
     rejected = []
     for r in report["variables"]:
@@ -590,17 +600,24 @@ def main():
         cal = r["calibrated"]
         crps_ok = cal["crps_3pt"] <= raw["crps_3pt"] + 1e-9
         cov_ok = abs(cal["coverage_80"] - 0.8) <= abs(raw["coverage_80"] - 0.8) + 1e-9
-        r["accepted"] = crps_ok and cov_ok
+        production_blocked = r["variable"] in PRODUCTION_REJECTED_VARIABLES
+        r["accepted"] = crps_ok and cov_ok and not production_blocked
         if r["accepted"]:
             accepted.append(r["variable"])
         else:
+            reasons = []
+            if not crps_ok:
+                reasons.append("CRPS regressed on test set")
+            if not cov_ok:
+                reasons.append("coverage regressed on test set")
+            if production_blocked:
+                reasons.append(
+                    "production verify 2026-04-13 showed wrong-direction "
+                    "movement (Round 4 Step 2 pin)"
+                )
             rejected.append({
                 "variable": r["variable"],
-                "reason": (
-                    ("CRPS regressed" if not crps_ok else "") +
-                    (" & " if (not crps_ok and not cov_ok) else "") +
-                    ("coverage regressed" if not cov_ok else "")
-                ).strip(),
+                "reason": " ; ".join(reasons) or "unknown",
             })
     report["accepted_variables"] = accepted
     report["rejected_variables"] = rejected
