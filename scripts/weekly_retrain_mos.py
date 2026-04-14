@@ -233,6 +233,26 @@ def step_refit_calibrators(dry_run: bool = False) -> bool:
     return True
 
 
+def step_refit_hurdle(dry_run: bool = False) -> bool:
+    """Council Round 4 Step 3 (Henri + Aiko): refit the precip hurdle model
+    (rain-occurrence Stage 1 + amount-conditional Stage 2) alongside the
+    weekly MOS retrain. Non-fatal on failure — if it fails or fails the
+    gate, the previous hurdle payload (or none) is left in place.
+    """
+    if dry_run:
+        logger.info("[dry-run] skipping hurdle refit")
+        return True
+    rc = run([
+        _VENV_PY, "scripts/train_mos_hurdle.py",
+        "--quiet",
+    ])
+    if rc != 0:
+        logger.warning("hurdle refit failed (rc=%d) — leaving previous precip_hurdle dir in place", rc)
+        return False
+    logger.info("hurdle refit ok")
+    return True
+
+
 def append_log(entry: dict) -> None:
     entries = []
     if os.path.exists(LOG_PATH):
@@ -286,8 +306,9 @@ def main():
         if not ok:
             logger.error("promote failed")
         else:
-            # Refit isotonic calibrators against the freshly promoted models.
+            # Refit post-hoc transforms against the freshly promoted models.
             step_refit_calibrators(dry_run=args.dry_run)
+            step_refit_hurdle(dry_run=args.dry_run)
     else:
         step_reject()
 

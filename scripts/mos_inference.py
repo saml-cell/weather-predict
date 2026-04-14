@@ -138,6 +138,7 @@ DEFAULT_MODELS_DIR = os.path.join(
     "mos_models_station",
 )
 CALIBRATORS_FILENAME = "isotonic_calibrators.pkl"
+HURDLE_SUBDIR = "precip_hurdle"
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 HTTP_TIMEOUT_S = 30
 
@@ -159,6 +160,8 @@ _cities_meta_cache: dict = {}
 _cities_meta_lock = threading.Lock()
 _calibrators_cache: dict = {}
 _calibrators_cache_lock = threading.Lock()
+_hurdle_cache: dict = {}
+_hurdle_cache_lock = threading.Lock()
 
 
 def _read_feature_set(models_dir: str) -> str:
@@ -243,6 +246,93 @@ def models_available(models_dir: str = DEFAULT_MODELS_DIR) -> bool:
             if not os.path.exists(path):
                 return False
     return True
+
+
+def load_hurdle_models(models_dir: str = DEFAULT_MODELS_DIR) -> dict:
+    """Load the Council Round 4 Step 3 precip hurdle model, if present.
+
+    Returns a dict like `{stage1: Booster, stage2: {0.1: Booster, 0.5: Booster,
+    0.9: Booster}}` on success, or an empty dict if the hurdle directory is
+    missing (callers then fall back to the standard quantile MOS for precip).
+    """
+    global _hurdle_cache
+    hurdle_dir = os.path.join(models_dir, HURDLE_SUBDIR)
+    with _hurdle_cache_lock:
+        if _hurdle_cache.get("_dir") == models_dir and "_models" in _hurdle_cache:
+            return _hurdle_cache["_models"]
+        out: dict = {}
+        stage1_path = os.path.join(hurdle_dir, "stage1_occurrence.txt")
+        if not os.path.exists(stage1_path):
+            _hurdle_cache = {"_dir": models_dir, "_models": out}
+            return out
+        try:
+            stage1 = lgb.Booster(model_file=stage1_path)
+            stage2: dict = {}
+            for q in QUANTILES:
+                p = os.path.join(
+                    hurdle_dir, f"stage2_amount_q{int(round(q * 100)):03d}.txt"
+                )
+                if not os.path.exists(p):
+                    logger.warning("hurdle stage2 model missing: %s", p)
+                    _hurdle_cache = {"_dir": models_dir, "_models": {}}
+                    return {}
+                stage2[q] = lgb.Booster(model_file=p)
+            out = {"stage1": stage1, "stage2": stage2}
+            logger.info(
+                "loaded precip hurdle model (stage1 + %d stage2 quantiles)",
+                len(stage2),
+            )
+        except Exception as e:
+            logger.warning("failed to load hurdle model: %s", e)
+            out = {}
+        _hurdle_cache = {"_dir": models_dir, "_models": out}
+        return out
+
+
+def _marginal_precip_quantiles(
+    p_rain: np.ndarray,
+    q10_amt: np.ndarray,
+    q50_amt: np.ndarray,
+    q90_amt: np.ndarray,
+) -> dict:
+    """Reconstruct the hurdle model's marginal precip quantiles per row.
+
+    Mirrors `train_mos_hurdle.marginal_quantiles` — kept inline here to avoid
+    a top-level import cycle between mos_inference and train_mos_hurdle.
+    """
+    p_rain = np.asarray(p_rain, dtype=float)
+    q10_amt = np.asarray(q10_amt, dtype=float)
+    q50_amt = np.asarray(q50_amt, dtype=float)
+    q90_amt = np.asarray(q90_amt, dtype=float)
+    n = len(p_rain)
+    stacked = np.column_stack([q10_amt, q50_amt, q90_amt])
+    stacked.sort(axis=1)
+    a, b, c = stacked[:, 0], stacked[:, 1], stacked[:, 2]
+    slope_ab = (b - a) / 0.4
+    slope_bc = (c - b) / 0.4
+    zero_mass = 1.0 - p_rain
+
+    out = {}
+    for tau in (0.1, 0.5, 0.9):
+        q = np.zeros(n, dtype=float)
+        in_zero = tau <= zero_mass
+        active = ~in_zero
+        if np.any(active):
+            denom = np.where(p_rain > 1e-9, p_rain, 1e-9)
+            tau_amount = np.zeros(n, dtype=float)
+            tau_amount[active] = (tau - zero_mass[active]) / denom[active]
+            tau_amount = np.clip(tau_amount, 0.001, 0.999)
+            below = active & (tau_amount < 0.1)
+            low_mid = active & (tau_amount >= 0.1) & (tau_amount < 0.5)
+            high_mid = active & (tau_amount >= 0.5) & (tau_amount < 0.9)
+            above = active & (tau_amount >= 0.9)
+            q[below] = a[below] - (0.1 - tau_amount[below]) * slope_ab[below]
+            q[low_mid] = a[low_mid] + (tau_amount[low_mid] - 0.1) * slope_ab[low_mid]
+            q[high_mid] = b[high_mid] + (tau_amount[high_mid] - 0.5) * slope_bc[high_mid]
+            q[above] = c[above] + (tau_amount[above] - 0.9) * slope_bc[above]
+            q[q < 0] = 0.0
+        out[tau] = q
+    return out
 
 
 def load_calibrators(models_dir: str = DEFAULT_MODELS_DIR) -> dict:
@@ -617,12 +707,40 @@ def predict_hourly(
 
     fset = feature_set_for(models_dir)
     calibrators = load_calibrators(models_dir)
+    hurdle = load_hurdle_models(models_dir)
 
     out = None
     for variable in VARIABLES:
         X = engineer_features(long_df, variable, city_id, feature_set=fset)
         if X.empty:
             continue
+
+        # Council Round 4 Step 3: precip uses the two-stage hurdle model
+        # (rain-occurrence + amount-conditional quantile MOS) when present,
+        # reconstructing the marginal distribution row-by-row. Falls through
+        # to the standard quantile MOS if the hurdle payload is missing.
+        if variable == "precip_mm" and hurdle:
+            p_rain = hurdle["stage1"].predict(X)
+            stage2_preds = {}
+            for q in QUANTILES:
+                booster = hurdle["stage2"].get(q)
+                if booster is None:
+                    break
+                stage2_preds[q] = booster.predict(X)
+            if len(stage2_preds) == len(QUANTILES):
+                stacked = np.column_stack([stage2_preds[q] for q in QUANTILES])
+                stacked.sort(axis=1)
+                marginal = _marginal_precip_quantiles(
+                    p_rain, stacked[:, 0], stacked[:, 1], stacked[:, 2],
+                )
+                for q in QUANTILES:
+                    arr = _clip_physics(variable, marginal[q])
+                    col = f"{variable}_p{int(round(q * 100)):02d}"
+                    if out is None:
+                        out = pd.DataFrame(index=X.index)
+                    out[col] = arr
+                continue  # skip the standard-MOS branch for precip
+
         preds_by_q = {}
         for q in QUANTILES:
             booster = models.get((variable, q))

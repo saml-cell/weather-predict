@@ -1,0 +1,89 @@
+{
+  "trained_at": "2026-04-14T07:12:44Z",
+  "epsilon": 0.1,
+  "feature_cols": [
+    "src_ecmwf_ifs025",
+    "src_gfs_global",
+    "src_icon_seamless",
+    "src_jma_seamless",
+    "ensemble_mean",
+    "ensemble_std",
+    "ensemble_min",
+    "ensemble_max",
+    "ensemble_n",
+    "lead_hours",
+    "hour_sin",
+    "hour_cos",
+    "doy_sin",
+    "doy_cos",
+    "month",
+    "year",
+    "city_id",
+    "lat",
+    "lon",
+    "elevation_m",
+    "abs_lat",
+    "hemisphere_ns",
+    "climate_band",
+    "saturation_distance_c",
+    "specific_humidity_gkg",
+    "lcl_height_m",
+    "aux_temp_c_mean",
+    "aux_temp_c_std",
+    "aux_humidity_pct_mean",
+    "aux_humidity_pct_std",
+    "aux_dew_point_c_mean",
+    "aux_dew_point_c_std",
+    "aux_pressure_msl_hpa_mean",
+    "aux_pressure_msl_hpa_std",
+    "aux_cloud_cover_pct_mean",
+    "aux_cloud_cover_pct_std",
+    "aux_wind_dir_sin_mean",
+    "aux_wind_dir_cos_mean",
+    "pressure_tendency_3h_hpa"
+  ],
+  "categorical": [
+    "month",
+    "city_id",
+    "hemisphere_ns",
+    "climate_band"
+  ],
+  "stage1": {
+    "brier_val": 0.04853757852664828,
+    "brier_test": 0.046359648501133464,
+    "best_iter": 223
+  },
+  "stage2": {
+    "conditional_val": {
+      "pinball": {
+        "q10": 0.0852204811123535,
+        "q50": 0.3242262321968931,
+        "q90": 0.26439889666217187
+      },
+      "coverage_80": 0.6923737455052863,
+      "crps_proxy": 0.4492304066476123
+    },
+    "best_iters": {
+      "0.1": 74,
+      "0.5": 185,
+      "0.9": 172
+    }
+  },
+  "joint_test": {
+    "crps": 0.06117894139701676,
+    "cov80": 0.9668898382093356,
+    "pinball": {
+      "q10": 0.010268337025168491,
+      "q50": 0.04158096447489743,
+      "q90": 0.039919110595459224
+    },
+    "median_mae": 0.08316192894979486,
+    "median_rmse": 0.4616592400914393
+  },
+  "baseline_precip_mos": {
+    "crps": 0.061541470495910744,
+    "cov80": 0.9577767100824098,
+    "median_mae": 0.08397681315501648
+  },
+  "accepted": true
+}
