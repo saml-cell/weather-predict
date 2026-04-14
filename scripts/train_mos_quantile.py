@@ -155,6 +155,8 @@ OBS_TABLE_STATION = "observations_hourly_station"
 FEATURE_SET_V1 = "v1"  # original baseline
 FEATURE_SET_V2 = "v2"  # + climate-zone + physics
 FEATURE_SET_V3 = "v3"  # + cross-variable aux features + pressure tendency
+FEATURE_SET_V3_1 = "v3.1"  # Round 4.5: + 4-var obs lag (24/48/168h) + diffs +
+                           # td_margin + saturation_deficit. Lena+Aiko consensus.
                        # The v3 additions: ensemble mean+std of dew_point_c,
                        # pressure_msl_hpa, cloud_cover_pct (all ignored by
                        # v1/v2); wind_dir as sin/cos circular encoding;
@@ -320,6 +322,52 @@ def load_joined(
     return df
 
 
+def attach_obs_lag_features(
+    df: pd.DataFrame,
+    conn: sqlite3.Connection,
+    target_source: str = "station",
+    lag_hours: tuple = (24, 48, 168),
+    lag_vars: tuple = ("temp_c", "humidity_pct", "wind_speed_kmh", "precip_mm"),
+) -> pd.DataFrame:
+    """Round 4.5 v3.1: attach lagged-observation columns to df.
+
+    For each (lag_h, var) pair, adds a column `obs_lag_<lag_h>h_<var>` whose
+    value at row (city_id=c, valid_time=t) is the observed `var` for city c
+    at time t − lag_h. Built via merge on shifted timestamps so it is robust
+    to sparse / non-contiguous obs sequences.
+
+    Both training and inference can call this — at inference time, the
+    timestamps to look up are in the past, so no future leakage.
+    """
+    if df.empty:
+        return df
+    obs_table = OBS_TABLE_STATION if target_source == "station" else OBS_TABLE_ERA5
+    cols_sql = ", ".join(lag_vars)
+    obs_all = pd.read_sql_query(
+        f"SELECT city_id, valid_time, {cols_sql} FROM {obs_table}",
+        conn,
+    )
+    if obs_all.empty:
+        for h in lag_hours:
+            for v in lag_vars:
+                df[f"obs_lag_{h}h_{v}"] = np.nan
+        return df
+
+    obs_all["vt_dt"] = pd.to_datetime(obs_all["valid_time"], utc=True)
+    df = df.copy()
+    df["vt_dt"] = pd.to_datetime(df["valid_time"], utc=True)
+
+    for h in lag_hours:
+        shifted = obs_all[["city_id", "vt_dt"] + list(lag_vars)].copy()
+        shifted["vt_dt"] = shifted["vt_dt"] + pd.Timedelta(hours=h)
+        shifted = shifted.rename(
+            columns={v: f"obs_lag_{h}h_{v}" for v in lag_vars}
+        )
+        df = df.merge(shifted, on=["city_id", "vt_dt"], how="left")
+
+    return df
+
+
 def _climate_band(abs_lat: float) -> int:
     """Coarse climate-band classification from |lat|.
 
@@ -428,7 +476,7 @@ def engineer_features(
         ]
     )
 
-    if feature_set in (FEATURE_SET_V2, FEATURE_SET_V3):
+    if feature_set in (FEATURE_SET_V2, FEATURE_SET_V3, FEATURE_SET_V3_1):
         # Climate-zone features from cities table
         if cities_meta is None:
             cities_meta = {}
@@ -451,7 +499,7 @@ def engineer_features(
             "saturation_distance_c", "specific_humidity_gkg", "lcl_height_m",
         ]
 
-    if feature_set == FEATURE_SET_V3:
+    if feature_set in (FEATURE_SET_V3, FEATURE_SET_V3_1):
         # Cross-variable auxiliary features (already loaded by load_joined
         # when feature_set_v3=True). Add them as direct feature columns so
         # the trainer can actually use them.
@@ -478,6 +526,34 @@ def engineer_features(
         df["pressure_tendency_3h_hpa"] = df_sorted["pressure_tendency_3h_hpa"]
 
         feature_cols += v3_extras + ["pressure_tendency_3h_hpa"]
+
+    if feature_set == FEATURE_SET_V3_1:
+        # Round 4.5: lag features (must be pre-attached by attach_obs_lag_features),
+        # rate-of-change diffs, td_margin, saturation_deficit_pct.
+        LAG_VARS = ("temp_c", "humidity_pct", "wind_speed_kmh", "precip_mm")
+        LAG_HOURS = (24, 48, 168)
+        for h in LAG_HOURS:
+            for v in LAG_VARS:
+                col = f"obs_lag_{h}h_{v}"
+                if col not in df.columns:
+                    df[col] = np.nan
+                feature_cols.append(col)
+        # Rate of change over the last 24h, computed from lags so it is
+        # equally available at training and inference time.
+        for v in ("temp_c", "humidity_pct", "wind_speed_kmh"):
+            col = f"obs_diff_24h_{v}"
+            df[col] = df[f"obs_lag_24h_{v}"] - df[f"obs_lag_48h_{v}"]
+            feature_cols.append(col)
+        # Aiko physics features derived from existing v3 aux columns.
+        df["td_margin"] = (
+            df.get("aux_temp_c_mean", pd.Series(np.nan, index=df.index))
+            - df.get("aux_dew_point_c_mean", pd.Series(np.nan, index=df.index))
+        )
+        df["saturation_deficit_pct"] = (
+            100.0
+            - df.get("aux_humidity_pct_mean", pd.Series(np.nan, index=df.index))
+        )
+        feature_cols += ["td_margin", "saturation_deficit_pct"]
 
     X = df[feature_cols].copy()
     y = df["obs"].astype(float)
@@ -764,14 +840,21 @@ def train_variable(
         variable,
         city_id=city_id,
         target_source=target_source,
-        load_aux=(feature_set in (FEATURE_SET_V2, FEATURE_SET_V3)),
-        feature_set_v3=(feature_set == FEATURE_SET_V3),
+        load_aux=(feature_set in (FEATURE_SET_V2, FEATURE_SET_V3, FEATURE_SET_V3_1)),
+        feature_set_v3=(feature_set in (FEATURE_SET_V3, FEATURE_SET_V3_1)),
     )
     if df.empty:
         logger.warning("[%s] no joined rows, skipping", variable)
         return {"variable": variable, "skipped": "no_data"}
 
     logger.info("[%s] loaded %d joined rows", variable, len(df))
+
+    if feature_set == FEATURE_SET_V3_1:
+        df = attach_obs_lag_features(df, conn, target_source=target_source)
+        logger.info(
+            "[%s] attached obs lag features (4 vars × 3 lags = 12 lag cols)",
+            variable,
+        )
 
     X, y, feature_cols = engineer_features(df, cities_meta=cities_meta, feature_set=feature_set)
     df_feat = df.copy()  # keep valid_time for split
@@ -1089,7 +1172,7 @@ def parse_args():
     )
     p.add_argument(
         "--feature-set",
-        choices=[FEATURE_SET_V1, FEATURE_SET_V2, FEATURE_SET_V3],
+        choices=[FEATURE_SET_V1, FEATURE_SET_V2, FEATURE_SET_V3, FEATURE_SET_V3_1],
         default=FEATURE_SET_V1,
         help="v1 = baseline (src+ensemble+cyclic+city_id). "
              "v2 = + climate-zone (lat/lon/elev/hemisphere/band) + physics "
@@ -1133,7 +1216,7 @@ def main():
     conn = get_connection()
     cities_meta = (
         load_cities_meta(conn)
-        if args.feature_set in (FEATURE_SET_V2, FEATURE_SET_V3)
+        if args.feature_set in (FEATURE_SET_V2, FEATURE_SET_V3, FEATURE_SET_V3_1)
         else None
     )
     logger.info(
