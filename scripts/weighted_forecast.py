@@ -117,7 +117,7 @@ def _allowed_sources_for(city_name):
     """
     try:
         cfg = db.load_config()
-    except Exception:
+    except (OSError, json.JSONDecodeError):
         return None
     tier_1 = {c.lower() for c in cfg.get("tier_1_cities", [])}
     tier_2 = {c.lower() for c in cfg.get("tier_2_cities", [])}
@@ -466,7 +466,7 @@ def produce_forecast(city_name):
                         }
                 try:
                     _info = _mos.model_info()
-                except Exception:
+                except (OSError, json.JSONDecodeError, AttributeError):
                     _info = {}
                 mos_summary = {
                     "available": True,
@@ -488,6 +488,15 @@ def produce_forecast(city_name):
             mos_summary = {"available": False, "reason": f"exception: {e}"}
     else:
         mos_summary = {"available": False, "reason": "MOS module not imported or no city id"}
+
+    # Enrich each daily forecast with HDD/CDD (heating/cooling degree days)
+    try:
+        from degree_days import enrich_day as _enrich_dd
+        for _day in daily_forecast:
+            _enrich_dd(_day, base_c=18.0)
+    except Exception as _e:
+        import logging as _lg
+        _lg.getLogger(__name__).debug("HDD/CDD enrichment skipped: %s", _e)
 
     return {
         "location": {
