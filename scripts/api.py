@@ -652,6 +652,40 @@ def internal_error(e):
     return jsonify({"error": "Internal server error"}), 500
 
 
+@app.route("/api/skill/leadtime", methods=["GET"])
+def api_skill_leadtime():
+    """Lead-time-stratified forecast MAE per source + metric.
+    Returns only rows with samples > 5 to suppress noise.
+    """
+    conn = db.get_connection()
+    metrics = ["temp_high", "temp_low", "precip_mm", "wind", "condition"]
+    leads = ["day+1", "day+2-3", "day+4-7"]
+    out = []
+    for metric in metrics:
+        for lead in leads:
+            rows = conn.execute(
+                """SELECT source_name, AVG(mae) AS mae, AVG(rmse) AS rmse,
+                          AVG(bias) AS bias, SUM(sample_count) AS n
+                   FROM source_accuracy
+                   WHERE metric=? AND sample_count > 0
+                   GROUP BY source_name
+                   HAVING n >= 5
+                   ORDER BY mae""",
+                (f"{metric}:{lead}",),
+            ).fetchall()
+            for r in rows:
+                out.append({
+                    "source": r["source_name"],
+                    "metric": metric,
+                    "lead": lead,
+                    "mae": round(r["mae"], 3) if r["mae"] is not None else None,
+                    "rmse": round(r["rmse"], 3) if r["rmse"] is not None else None,
+                    "bias": round(r["bias"], 3) if r["bias"] is not None else None,
+                    "n": r["n"],
+                })
+    return jsonify({"rows": out, "leads": leads, "metrics": metrics})
+
+
 @app.route("/api/polymarket/status", methods=["GET"])
 def api_polymarket_status():
     """Polymarket weather paper-tracker status: latest scan + top edges + P&L."""

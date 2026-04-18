@@ -588,6 +588,36 @@ def format_morning_briefing():
                 t_precip_str = f"{t_precip:.0f}%" if t_precip is not None else "?"
                 lines.append(f"  Zajtra: ↑{t_high}°C | Dážď: {t_precip_str}")
 
+            # --- MOS probabilistic band (P1 backlog item) ---
+            # Show p10/p50/p90 for next 3 days if MOS models are loaded
+            mos_daily = [
+                d for d in fc.get("daily", [])[:4]
+                if d.get("mos") and d["mos"].get("temp_high_p50") is not None
+            ]
+            if mos_daily:
+                lines.append("")
+                lines.append("🎯 *MOS predikcia (p10–p50–p90, 80% interval)*")
+                for d in mos_daily[:3]:
+                    m = d["mos"]
+                    p10 = m.get("temp_high_p10")
+                    p50 = m.get("temp_high_p50")
+                    p90 = m.get("temp_high_p90")
+                    if None in (p10, p50, p90):
+                        continue
+                    dt = d.get("date", "")
+                    # Slovak short day name
+                    try:
+                        from datetime import datetime as _dt
+                        dnum = _dt.fromisoformat(dt).weekday()
+                        dn = DAY_NAMES.get(dnum, "")[:3]
+                    except Exception:
+                        dn = ""
+                    band_w = p90 - p10
+                    lines.append(
+                        f"  {dn} {dt[-5:]}: {p10:.1f}–*{p50:.1f}*–{p90:.1f}°C  "
+                        f"(šírka {band_w:.1f}°C)"
+                    )
+
     # Other cities (compact, one line)
     other_cities = [c for c in cities if ba_city and c["id"] != ba_city["id"]]
     if other_cities:
@@ -625,6 +655,26 @@ def format_morning_briefing():
         else:
             b_emoji = "🟢"
         lines.append(f"{b_emoji} Model: {budget['model']} | Budget: {b_pct:.0f}% | {budget['days_left']:.0f}d left")
+
+    # --- MOS SKILL FOOTER (trust anchor) ---
+    try:
+        import sqlite3 as _sql
+        import os as _os
+        db_path = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "..", "data", "weather.db")
+        _con = _sql.connect(db_path)
+        _row = _con.execute(
+            """SELECT AVG(mos_mae) AS mae, AVG(mos_coverage_80) AS cov
+               FROM mos_daily_skill WHERE variable='temp_c'
+                 AND verify_date >= date('now','-30 days')"""
+        ).fetchone()
+        _con.close()
+        if _row and _row[0] is not None:
+            mae, cov = _row
+            cov_pct = (cov * 100) if cov and cov < 1.5 else cov
+            lines.append("")
+            lines.append(f"📊 MOS teplota (30d): ±{mae:.2f}°C, krytie 80%: {cov_pct:.0f}%")
+    except Exception:
+        pass
 
     lines.append("")
     lines.append("━━━━━━━━━━━━━━━━━━━━")
@@ -823,7 +873,7 @@ def run_listener():
             data=payload, headers={"Content-Type": "application/json"}
         )
         urlopen(req, timeout=5)
-    except Exception:
+    except (URLError, TimeoutError, OSError):
         pass
 
     last_update_id = 0
