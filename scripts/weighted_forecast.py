@@ -441,29 +441,51 @@ def produce_forecast(city_name):
                 forecast_days=7,
             )
             if mos_result.get("models_loaded") and mos_result.get("daily_by_date"):
-                # Attach per-day MOS quantiles to each daily entry
+                # Load suppressed (city, variable) pairs from config — chronic regressors
+                try:
+                    _cfg = db.load_config()
+                except Exception:
+                    _cfg = {}
+                _suppressed = _cfg.get("mos_suppress_pairs", {}).get(city["name"], [])
+
+                # Attach per-day MOS quantiles to each daily entry (honoring suppress list)
                 daily_by_date = mos_result["daily_by_date"]
                 for day_data in daily_forecast:
                     mos_day = daily_by_date.get(day_data["date"])
                     if mos_day:
-                        day_data["mos"] = {
-                            "temp_high_p10": mos_day.get("temp_high_p10"),
-                            "temp_high_p50": mos_day.get("temp_high_p50"),
-                            "temp_high_p90": mos_day.get("temp_high_p90"),
-                            "temp_low_p10": mos_day.get("temp_low_p10"),
-                            "temp_low_p50": mos_day.get("temp_low_p50"),
-                            "temp_low_p90": mos_day.get("temp_low_p90"),
-                            "precip_mm_p10": mos_day.get("precip_mm_sum_p10"),
-                            "precip_mm_p50": mos_day.get("precip_mm_sum_p50"),
-                            "precip_mm_p90": mos_day.get("precip_mm_sum_p90"),
-                            "wind_max_kmh_p10": mos_day.get("wind_max_kmh_p10"),
-                            "wind_max_kmh_p50": mos_day.get("wind_max_kmh_p50"),
-                            "wind_max_kmh_p90": mos_day.get("wind_max_kmh_p90"),
-                            "humidity_p10": mos_day.get("humidity_mean_p10"),
-                            "humidity_p50": mos_day.get("humidity_mean_p50"),
-                            "humidity_p90": mos_day.get("humidity_mean_p90"),
-                            "n_hours": mos_day.get("n_hours"),
-                        }
+                        mos_entry = {}
+                        # temp_c group
+                        if "temp_c" not in _suppressed:
+                            mos_entry.update({
+                                "temp_high_p10": mos_day.get("temp_high_p10"),
+                                "temp_high_p50": mos_day.get("temp_high_p50"),
+                                "temp_high_p90": mos_day.get("temp_high_p90"),
+                                "temp_low_p10": mos_day.get("temp_low_p10"),
+                                "temp_low_p50": mos_day.get("temp_low_p50"),
+                                "temp_low_p90": mos_day.get("temp_low_p90"),
+                            })
+                        if "precip_mm" not in _suppressed:
+                            mos_entry.update({
+                                "precip_mm_p10": mos_day.get("precip_mm_sum_p10"),
+                                "precip_mm_p50": mos_day.get("precip_mm_sum_p50"),
+                                "precip_mm_p90": mos_day.get("precip_mm_sum_p90"),
+                            })
+                        if "wind_speed_kmh" not in _suppressed:
+                            mos_entry.update({
+                                "wind_max_kmh_p10": mos_day.get("wind_max_kmh_p10"),
+                                "wind_max_kmh_p50": mos_day.get("wind_max_kmh_p50"),
+                                "wind_max_kmh_p90": mos_day.get("wind_max_kmh_p90"),
+                            })
+                        if "humidity_pct" not in _suppressed:
+                            mos_entry.update({
+                                "humidity_p10": mos_day.get("humidity_mean_p10"),
+                                "humidity_p50": mos_day.get("humidity_mean_p50"),
+                                "humidity_p90": mos_day.get("humidity_mean_p90"),
+                            })
+                        mos_entry["n_hours"] = mos_day.get("n_hours")
+                        if _suppressed:
+                            mos_entry["suppressed_variables"] = _suppressed
+                        day_data["mos"] = mos_entry
                 try:
                     _info = _mos.model_info()
                 except (OSError, json.JSONDecodeError, AttributeError):

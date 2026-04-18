@@ -95,14 +95,30 @@
     "OpenWeatherMap",
     "WeatherAPI",
     "VisualCrossing",
-    "NOAA_NWS",
     "ECMWF"
+  ],
+  "_dropped_sources_2026-04-19": [
+    "NOAA_NWS — 27.5% NULL rate on temp_high_c + US-only; dropped 2026-04-19 per audit"
   ],
   "tier_2_sources": [
     "Open-Meteo",
     "wttr.in",
     "WeatherAPI"
   ],
+  "mos_suppress_pairs": {
+    "_comment": "Pairs where MOS is chronically worse than ensemble by >1. API/consumers should fall back to weighted_ensemble value instead of MOS. Review monthly, retrain may flip these back.",
+    "Mumbai": ["humidity_pct"],
+    "Houston": ["humidity_pct"],
+    "Auckland": ["humidity_pct"],
+    "Denver": ["humidity_pct"],
+    "Johannesburg": ["humidity_pct"],
+    "Lagos": ["humidity_pct"],
+    "Vancouver": ["wind_speed_kmh"],
+    "Beijing": ["humidity_pct"],
+    "Tokyo": ["humidity_pct"],
+    "New York": ["humidity_pct"],
+    "Madrid": ["humidity_pct"]
+  },
   "scoring": {
     "window_days": 30,
     "min_samples": 7,
