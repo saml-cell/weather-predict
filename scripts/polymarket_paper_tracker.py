@@ -323,9 +323,79 @@ def resolve_day(target: date) -> dict:
     return stats
 
 
+def status_report() -> None:
+    """Human-readable dashboard: latest scan summary + paper P&L so far."""
+    con = sqlite3.connect(DB_PATH)
+    con.row_factory = sqlite3.Row
+
+    latest_target = con.execute(
+        "SELECT MAX(target_date) FROM polymarket_scan"
+    ).fetchone()[0]
+    if not latest_target:
+        print("No scans yet. Run: python3 scripts/polymarket_paper_tracker.py scan")
+        return
+
+    print(f"\n=== Polymarket Weather Tracker — Status at {datetime.now().strftime('%Y-%m-%d %H:%M')} ===\n")
+
+    # Latest scan summary
+    print(f"[Latest scan target: {latest_target}]")
+    rows = con.execute("""SELECT city_name, mos_p50, COUNT(*) AS n,
+                                  SUM(would_bet_side IS NOT NULL) AS bets
+                          FROM polymarket_scan WHERE target_date=?
+                          GROUP BY city_name ORDER BY city_name""",
+                       (latest_target,)).fetchall()
+    for r in rows:
+        print(f"  {r['city_name']:12} MOS p50={r['mos_p50']:5.1f}°C  buckets={r['n']:2}  flagged-bets={r['bets']}")
+
+    # Top edges tomorrow
+    print(f"\n[Top 8 edges for {latest_target}]")
+    for r in con.execute("""SELECT city_name, bucket_label, market_yes, mos_prob, edge, would_bet_side
+                             FROM polymarket_scan
+                             WHERE target_date=? AND would_bet_side IS NOT NULL
+                             ORDER BY ABS(edge) DESC LIMIT 8""", (latest_target,)):
+        print(f"  {r['city_name']:10} {r['would_bet_side']:3} {r['bucket_label']:20} mkt={r['market_yes']:.2f} mos={r['mos_prob']:.2f} edge={r['edge']:+.2f}")
+
+    # Paper P&L aggregate
+    print("\n[Paper P&L — resolved bets only]")
+    p = con.execute("""SELECT COUNT(*) AS bets,
+                              SUM(paper_pnl > 0) AS wins,
+                              SUM(paper_pnl < 0) AS losses,
+                              ROUND(SUM(paper_pnl), 2) AS total_pnl,
+                              ROUND(AVG(paper_pnl), 3) AS avg_pnl
+                       FROM polymarket_scan WHERE paper_pnl IS NOT NULL""").fetchone()
+    bets = p["bets"] or 0
+    if bets == 0:
+        print("  No resolved bets yet. First resolution cron runs at 08:00 UTC daily.")
+    else:
+        wins = p["wins"] or 0
+        winrate = 100.0 * wins / bets if bets else 0
+        print(f"  Resolved bets: {bets}    Wins: {wins}    Losses: {p['losses']}    Win rate: {winrate:.1f}%")
+        print(f"  Total paper P&L: {p['total_pnl']:+.2f}    Avg per bet: {p['avg_pnl']:+.3f}")
+
+    # Per-city breakdown (resolved)
+    bycity = con.execute("""SELECT city_name, COUNT(*) AS bets,
+                                  SUM(paper_pnl > 0) AS wins,
+                                  ROUND(SUM(paper_pnl),2) AS pnl
+                            FROM polymarket_scan WHERE paper_pnl IS NOT NULL
+                            GROUP BY city_name ORDER BY pnl DESC""").fetchall()
+    if bycity:
+        print("\n[Per-city P&L]")
+        for r in bycity:
+            print(f"  {r['city_name']:12} bets={r['bets']:2}  wins={r['wins']:2}  pnl={r['pnl']:+.2f}")
+
+    # Coverage check
+    print("\n[Data coverage]")
+    covered = con.execute("SELECT COUNT(DISTINCT target_date) FROM polymarket_scan").fetchone()[0]
+    resolved = con.execute("SELECT COUNT(DISTINCT target_date) FROM polymarket_scan WHERE paper_pnl IS NOT NULL").fetchone()[0]
+    print(f"  Target dates scanned: {covered}    Resolved: {resolved}")
+    print(f"  Log: ~/.openclaw/logs/polymarket-paper.log")
+
+    con.close()
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["scan", "resolve"])
+    ap.add_argument("mode", choices=["scan", "resolve", "status"])
     ap.add_argument("--target", help="YYYY-MM-DD; defaults to tomorrow for scan, yesterday for resolve")
     args = ap.parse_args()
 
@@ -335,11 +405,13 @@ def main():
         print(f"Scanning Polymarket weather events for {target}...")
         n = scan_once(target)
         print(f"Inserted/updated {n} bucket rows.")
-    else:
+    elif args.mode == "resolve":
         target = date.fromisoformat(args.target) if args.target else today - timedelta(days=1)
         print(f"Resolving scans for {target}...")
         stats = resolve_day(target)
         print(json.dumps(stats, indent=2, default=str))
+    else:
+        status_report()
 
 
 if __name__ == "__main__":

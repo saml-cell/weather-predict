@@ -29,7 +29,6 @@ import socket
 from collections import defaultdict
 from datetime import date, timedelta, datetime
 
-# Load .env file if present (so WEATHER_API_KEY etc. work without manual export)
 _env_path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), ".env")
 if os.path.isfile(_env_path):
     with open(_env_path) as _f:
@@ -39,7 +38,7 @@ if os.path.isfile(_env_path):
                 _key, _, _val = _line.partition("=")
                 _key = _key.strip()
                 _val = _val.strip()
-                if _key and _key not in os.environ:  # don't override existing
+                if _key and _key not in os.environ:
                     os.environ[_key] = _val
 
 from flask import Flask, jsonify, request, send_from_directory, abort
@@ -61,10 +60,7 @@ from climate_indices import get_current_index_state, build_climatology
 from alerts import check_city_alerts
 import mos_inference
 
-# Startup sanity check: load MOS models once at import time so a feature_set
-# mismatch (code vs. deployed metadata) fails the worker immediately instead of
-# silently serving broken forecasts. Gunicorn imports api.py per worker, so
-# this runs on every boot/restart.
+# Boot-time MOS load: feature_set mismatch must crash the worker, not silently serve broken forecasts
 try:
     _mos_boot_info = mos_inference.model_info()
     logger.info(
@@ -85,13 +81,8 @@ _HOST = os.environ.get("WEATHER_HOST", "0.0.0.0")
 app = Flask(__name__, static_folder=_DASHBOARD_DIR, static_url_path="")
 app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("WEATHER_MAX_BODY", 1048576))
 
-# ---------------------------------------------------------------------------
-# CORS: auto-detect all local IPs so the dashboard works from any address
-# ---------------------------------------------------------------------------
 def _build_cors_origins():
-    """Build CORS origin list. If CORS_ORIGINS env var is set, use that.
-    Otherwise auto-detect all local IPs so the dashboard works via
-    localhost, LAN IP, or Tailscale IP."""
+    """Honour CORS_ORIGINS env var, else scan local IPs (LAN, Tailscale, etc.)."""
     env_origins = os.environ.get("CORS_ORIGINS", "").strip()
     if env_origins:
         return [o.strip() for o in env_origins.split(",") if o.strip()]
@@ -99,12 +90,11 @@ def _build_cors_origins():
     origins = set()
     origins.add(f"http://localhost:{_PORT}")
     origins.add(f"http://127.0.0.1:{_PORT}")
+    import subprocess
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
             ip = info[4][0]
             origins.add(f"http://{ip}:{_PORT}")
-        # Also try Tailscale / other interfaces via netifaces-like scan
-        import subprocess
         result = subprocess.run(
             ["ip", "-4", "-o", "addr", "show"], capture_output=True, text=True, timeout=5
         )
@@ -115,7 +105,7 @@ def _build_cors_origins():
                     ip = part.split("/")[0]
                     if not ip.startswith("127."):
                         origins.add(f"http://{ip}:{_PORT}")
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         pass
     return list(origins)
 
@@ -123,9 +113,6 @@ def _build_cors_origins():
 _cors_origins = _build_cors_origins()
 CORS(app, origins=_cors_origins)
 
-# ---------------------------------------------------------------------------
-# API key auth for mutating endpoints
-# ---------------------------------------------------------------------------
 _API_KEY = os.environ.get("WEATHER_API_KEY", "")
 
 if not _API_KEY:
@@ -136,9 +123,7 @@ if not _API_KEY:
 
 
 def require_api_key(f):
-    """Decorator: require valid API key via X-API-Key header.
-    Disabled if WEATHER_API_KEY env var is not set (development mode).
-    """
+    """Require X-API-Key header; no-op when WEATHER_API_KEY is unset (dev mode)."""
     @functools.wraps(f)
     def decorated(*args, **kwargs):
         if not _API_KEY:
@@ -151,22 +136,19 @@ def require_api_key(f):
         return f(*args, **kwargs)
     return decorated
 
-# ---------------------------------------------------------------------------
-# Rate limiter (in-memory, per-IP)
-# ---------------------------------------------------------------------------
-_rate_limit_store = defaultdict(list)  # "bucket:ip" -> [timestamps]
+# In-memory per-IP rate limiter; key "bucket:ip" -> [timestamps]
+_rate_limit_store = defaultdict(list)
 _rate_limit_lock = threading.Lock()
 _rate_limit_call_count = 0
 
 _RATE_LIMITS = {
-    "add_city": {"max": 5, "window": 3600},       # 5 cities/hour
-    "api_read": {"max": 120, "window": 60},        # 120 reads/minute
-    "api_write": {"max": 20, "window": 60},        # 20 writes/minute
+    "add_city": {"max": 5, "window": 3600},
+    "api_read": {"max": 120, "window": 60},
+    "api_write": {"max": 20, "window": 60},
 }
 
 
 def _check_rate_limit(ip, bucket="add_city"):
-    """Return True if request is allowed, False if rate-limited."""
     global _rate_limit_call_count
     limits = _RATE_LIMITS.get(bucket, _RATE_LIMITS["api_read"])
     key = f"{bucket}:{ip}"
@@ -188,16 +170,13 @@ def _check_rate_limit(ip, bucket="add_city"):
 
     return True
 
-# ---------------------------------------------------------------------------
-# Forecast cache (in-memory TTL=30min)
-# ---------------------------------------------------------------------------
-_forecast_cache = {}  # city_id -> (timestamp, result)
+_forecast_cache = {}
 _forecast_cache_lock = threading.Lock()
-_FORECAST_TTL = 1800  # 30 minutes
+_FORECAST_TTL = 1800
 
 
 def invalidate_forecast_cache(city_id=None):
-    """Clear forecast cache. If city_id given, only that city; else all."""
+    """Clear forecast cache for one city, or all if city_id is None."""
     with _forecast_cache_lock:
         if city_id is not None:
             _forecast_cache.pop(city_id, None)
@@ -226,9 +205,13 @@ def serve_status():
     return send_from_directory(_STATUS_DIR, "status.html")
 
 
+@app.route("/skill")
+def serve_skill():
+    return send_from_directory(_DASHBOARD_DIR, "skill.html")
+
+
 @app.route("/<path:path>")
 def serve_static(path):
-    # Block path traversal attempts
     if ".." in path or path.startswith("/"):
         abort(404)
     ext = os.path.splitext(path)[1].lower()
@@ -239,9 +222,6 @@ def serve_static(path):
     # SPA fallback for client-side routes
     return send_from_directory(_DASHBOARD_DIR, "index.html")
 
-# ---------------------------------------------------------------------------
-# API: Cities
-# ---------------------------------------------------------------------------
 @app.route("/api/cities", methods=["GET"])
 def get_cities():
     cities = db.get_all_cities()
@@ -259,7 +239,6 @@ def add_city():
     city_name = data.get("name", "").strip()
     if not city_name:
         return jsonify({"error": "City name required"}), 400
-    # Sanitize: letters, spaces, hyphens, apostrophes, periods only. Max 100 chars.
     if len(city_name) > 100 or not re.match(r"^[\w\s\-'.À-ÿ]+$", city_name):
         return jsonify({"error": "Invalid city name"}), 400
 
@@ -267,7 +246,6 @@ def add_city():
     if not location:
         return jsonify({"error": f"Could not find city: {city_name}"}), 404
 
-    # Check if already tracked
     existing = db.get_city(location["name"])
     if existing:
         return jsonify({**existing, "already_tracked": True}), 200
@@ -281,10 +259,8 @@ def add_city():
     )
     city = db.get_city_by_id(city_id)
 
-    # Update config.json default_cities list
     _add_city_to_config(location["name"])
 
-    # Trigger background initial fetch
     import threading
     def _initial_fetch(cid, city_dict):
         try:
@@ -303,7 +279,6 @@ def add_city():
 
 
 def _add_city_to_config(city_name):
-    """Add city to config.json default_cities if not already there."""
     try:
         config_path = os.path.join(_PROJECT_DIR, "config.json")
         with _config_file_lock:
@@ -323,7 +298,6 @@ def _add_city_to_config(city_name):
 @app.route("/api/cities/<int:city_id>", methods=["DELETE"])
 @require_api_key
 def remove_city(city_id):
-    """Remove a city from tracking."""
     city = db.get_city_by_id(city_id)
     if not city:
         return jsonify({"error": "City not found"}), 404
@@ -338,7 +312,6 @@ def remove_city(city_id):
     conn.execute("DELETE FROM cities WHERE id = ?", (city_id,))
     conn.commit()
 
-    # Remove from config.json
     try:
         config_path = os.path.join(_PROJECT_DIR, "config.json")
         with _config_file_lock:
@@ -350,16 +323,13 @@ def remove_city(city_id):
                 config["default_cities"] = cities
                 with open(config_path, "w") as f:
                     json.dump(config, f, indent=2, ensure_ascii=False)
-    except Exception:
-        pass
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Failed to update config.json on city remove: %s", e)
 
     invalidate_forecast_cache(city_id)
     logger.info("Removed city: %s (id=%d)", city["name"], city_id)
     return jsonify({"status": "removed", "city": city})
 
-# ---------------------------------------------------------------------------
-# API: Forecast
-# ---------------------------------------------------------------------------
 @app.route("/api/forecast/<int:city_id>", methods=["GET"])
 def get_forecast(city_id):
     city = db.get_city_by_id(city_id)
@@ -379,16 +349,13 @@ def get_forecast(city_id):
         _forecast_cache[city_id] = (time.time(), forecast)
     return jsonify(forecast)
 
-# ---------------------------------------------------------------------------
-# API: Hourly forecast (lightweight, for animated map)
-# ---------------------------------------------------------------------------
 @app.route("/api/hourly/<int:city_id>", methods=["GET"])
 def get_hourly(city_id):
     city = db.get_city_by_id(city_id)
     if not city:
         return jsonify({"error": "City not found"}), 404
 
-    # Use the same cache as full forecast to avoid duplicate API calls
+    # Share full-forecast cache to avoid duplicate API calls
     with _forecast_cache_lock:
         cached = _forecast_cache.get(city_id)
     if cached and (time.time() - cached[0]) < _FORECAST_TTL:
@@ -408,9 +375,6 @@ def get_hourly(city_id):
         "hourly": forecast.get("hourly", []),
     })
 
-# ---------------------------------------------------------------------------
-# API: Observations (historical)
-# ---------------------------------------------------------------------------
 @app.route("/api/observations/<int:city_id>", methods=["GET"])
 def get_observations(city_id):
     city = db.get_city_by_id(city_id)
@@ -428,9 +392,6 @@ def get_observations(city_id):
         "period": {"start": start, "end": end},
     })
 
-# ---------------------------------------------------------------------------
-# API: Source accuracy & weights
-# ---------------------------------------------------------------------------
 @app.route("/api/accuracy/<int:city_id>", methods=["GET"])
 def get_accuracy(city_id):
     city = db.get_city_by_id(city_id)
@@ -443,9 +404,6 @@ def get_accuracy(city_id):
         "sources": weights,
     })
 
-# ---------------------------------------------------------------------------
-# API: Trends (temperature, precip, pressure over time)
-# ---------------------------------------------------------------------------
 @app.route("/api/trends/<int:city_id>", methods=["GET"])
 def get_trends(city_id):
     city = db.get_city_by_id(city_id)
@@ -458,7 +416,6 @@ def get_trends(city_id):
 
     observations = db.get_observations_in_window(city_id, start, end)
 
-    # Build trend arrays
     dates_list = []
     temp_highs = []
     temp_lows = []
@@ -474,7 +431,7 @@ def get_trends(city_id):
         pressure_vals.append(obs.get("pressure_hpa"))
         humidity_vals.append(obs.get("humidity_pct"))
 
-    # Source accuracy over time — single JOIN query instead of N+1
+    # Single JOIN avoids N+1
     source_errors = {}
     conn = db.get_connection()
     rows = conn.execute("""
@@ -507,9 +464,6 @@ def get_trends(city_id):
         "period": {"start": start, "end": end},
     })
 
-# ---------------------------------------------------------------------------
-# API: Source comparison for today
-# ---------------------------------------------------------------------------
 @app.route("/api/compare/<int:city_id>", methods=["GET"])
 def get_compare(city_id):
     city = db.get_city_by_id(city_id)
@@ -556,7 +510,6 @@ def get_seasonal(city_id):
 
 @app.route("/api/indices", methods=["GET"])
 def get_indices():
-    """Return current teleconnection index state."""
     try:
         state = get_current_index_state()
         if not state:
@@ -573,11 +526,7 @@ def get_indices():
 @app.route("/api/seasonal/climatology/<int:city_id>", methods=["POST"])
 @require_api_key
 def build_city_climatology(city_id):
-    """Build/refresh climatology for a city.
-
-    Runs build_climatology() in a background thread and returns immediately
-    with a 202 Accepted status, since the operation can take 30+ seconds.
-    """
+    """Kicks off background climatology build (30+ seconds), returns 202."""
     city = db.get_city_by_id(city_id)
     if not city:
         return jsonify({"error": "City not found"}), 404
@@ -602,17 +551,10 @@ def build_city_climatology(city_id):
     }), 202
 
 
-# ---------------------------------------------------------------------------
-# API: Alerts
-# ---------------------------------------------------------------------------
 @app.route("/api/alerts", methods=["GET"])
 def get_alerts():
-    """Return weather alerts for all cities or a specific city.
-
-    When city_id is provided, fetches alerts (including external API calls)
-    for that single city. Without city_id, fetches alerts for all cities
-    using ThreadPoolExecutor with max_workers=3 and a total timeout of 20s.
-    """
+    """Alerts for one city (?city_id=N) or all cities.
+    Concurrent fetch capped at 3 workers / 20s total."""
     from concurrent.futures import ThreadPoolExecutor, as_completed
 
     city_id = request.args.get("city_id", type=int)
@@ -625,6 +567,7 @@ def get_alerts():
     def _fetch_alerts(city):
         return check_city_alerts(city["id"], city["name"])
 
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
     with ThreadPoolExecutor(max_workers=3) as executor:
         future_to_city = {executor.submit(_fetch_alerts, c): c for c in cities}
         try:
@@ -632,16 +575,14 @@ def get_alerts():
                 try:
                     alerts = future.result(timeout=5)
                     all_alerts.extend(alerts)
-                except Exception:
-                    pass  # Skip cities that timeout or error
-        except TimeoutError:
-            pass  # Return whatever alerts we collected before timeout
+                except Exception as e:
+                    # External alert APIs are flaky; keep partial results
+                    logger.warning("alerts fetch failed for a city: %s", e)
+        except FuturesTimeoutError:
+            pass
 
     return jsonify({"alerts": all_alerts, "count": len(all_alerts)})
 
-# ---------------------------------------------------------------------------
-# API: Cache invalidation (called after fetch pipeline runs)
-# ---------------------------------------------------------------------------
 @app.route("/api/cache/invalidate", methods=["POST"])
 @require_api_key
 def api_invalidate_cache():
@@ -654,13 +595,9 @@ def api_invalidate_cache():
     invalidate_forecast_cache(city_id)
     return jsonify({"status": "ok", "cleared": city_name or city_id or "all"})
 
-# ---------------------------------------------------------------------------
-# Request logging, rate limiting, security headers
-# ---------------------------------------------------------------------------
 @app.before_request
 def _before_request():
     request._start_time = time.time()
-    # Global rate limit on API endpoints
     if request.path.startswith("/api/"):
         bucket = "api_write" if request.method in ("POST", "PUT", "DELETE") else "api_read"
         if not _check_rate_limit(request.remote_addr, bucket):
@@ -669,20 +606,16 @@ def _before_request():
 
 @app.after_request
 def _after_request(response):
-    # Security headers
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["X-Frame-Options"] = "SAMEORIGIN"
     response.headers["X-XSS-Protection"] = "1; mode=block"
     response.headers["Referrer-Policy"] = "strict-origin-when-cross-origin"
     response.headers["Permissions-Policy"] = "geolocation=(self)"
-    # Remove server header
     response.headers.pop("Server", None)
 
-    # Cache-Control for API GET responses
     if request.method == "GET" and request.path.startswith("/api/"):
         response.headers["Cache-Control"] = "public, max-age=300"
 
-    # Request logging
     elapsed = (time.time() - getattr(request, "_start_time", time.time())) * 1000
     if request.path.startswith("/api/"):
         logger.info("%s %s %d %.0fms %s", request.method, request.path,
@@ -690,9 +623,7 @@ def _after_request(response):
     return response
 
 
-# ---------------------------------------------------------------------------
-# Global error handlers — return JSON, never leak stack traces
-# ---------------------------------------------------------------------------
+# Error handlers must return JSON, never stack traces
 @app.errorhandler(404)
 def not_found(e):
     if request.path.startswith("/api/"):
@@ -716,29 +647,64 @@ def internal_error(e):
     return jsonify({"error": "Internal server error"}), 500
 
 
-# ---------------------------------------------------------------------------
-# Health check (detailed)
-# ---------------------------------------------------------------------------
+@app.route("/api/polymarket/status", methods=["GET"])
+def api_polymarket_status():
+    """Polymarket weather paper-tracker status: latest scan + top edges + P&L."""
+    conn = db.get_connection()
+    row = conn.execute("SELECT MAX(target_date) AS latest FROM polymarket_scan").fetchone()
+    latest = row["latest"] if row else None
+    if not latest:
+        return jsonify({"latest_scan_target": None, "message": "no scans yet"})
+
+    cities = [dict(r) for r in conn.execute(
+        """SELECT city_name, mos_p50, COUNT(*) AS buckets,
+                  SUM(CASE WHEN would_bet_side IS NOT NULL THEN 1 ELSE 0 END) AS flagged_bets
+           FROM polymarket_scan WHERE target_date=?
+           GROUP BY city_name ORDER BY city_name""", (latest,)).fetchall()]
+
+    top_edges = [dict(r) for r in conn.execute(
+        """SELECT city_name, bucket_label, market_yes, mos_prob, edge, would_bet_side, market_volume
+           FROM polymarket_scan
+           WHERE target_date=? AND would_bet_side IS NOT NULL
+           ORDER BY ABS(edge) DESC LIMIT 10""", (latest,)).fetchall()]
+
+    pnl_row = conn.execute(
+        """SELECT COUNT(*) AS bets,
+                  SUM(CASE WHEN paper_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                  SUM(CASE WHEN paper_pnl < 0 THEN 1 ELSE 0 END) AS losses,
+                  ROUND(SUM(paper_pnl), 2) AS total_pnl,
+                  ROUND(AVG(paper_pnl), 3) AS avg_pnl
+           FROM polymarket_scan WHERE paper_pnl IS NOT NULL""").fetchone()
+    pnl = {k: pnl_row[k] for k in pnl_row.keys()} if pnl_row else {}
+    if pnl.get("bets"):
+        pnl["win_rate_pct"] = round(100.0 * (pnl["wins"] or 0) / pnl["bets"], 1)
+
+    by_city = [dict(r) for r in conn.execute(
+        """SELECT city_name, COUNT(*) AS bets,
+                  SUM(CASE WHEN paper_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                  ROUND(SUM(paper_pnl), 2) AS pnl
+           FROM polymarket_scan WHERE paper_pnl IS NOT NULL
+           GROUP BY city_name ORDER BY pnl DESC""").fetchall()]
+
+    coverage = conn.execute(
+        """SELECT COUNT(DISTINCT target_date) AS scanned,
+                  COUNT(DISTINCT CASE WHEN paper_pnl IS NOT NULL THEN target_date END) AS resolved
+           FROM polymarket_scan""").fetchone()
+
+    return jsonify({
+        "latest_scan_target": latest,
+        "cities": cities,
+        "top_edges": top_edges,
+        "paper_pnl": pnl,
+        "by_city_pnl": by_city,
+        "coverage": dict(coverage) if coverage else {},
+    })
+
+
 @app.route("/api/mos/skill", methods=["GET"])
 def api_mos_skill():
-    """Council Round 3 Step 1+2 operational panel (Marcus's sign-off).
-
-    Returns rows from `mos_daily_skill` for dashboard charting. Query params:
-      days=N           — how many calendar days back (default 30)
-      variable=v       — optional filter: temp_c, humidity_pct, precip_mm, wind_speed_kmh
-      city_id=N        — optional filter on one city
-
-    Response shape:
-      {
-        "rows": [{verify_date, city_id, city_name, variable, crps, cov80, mae,
-                  n_obs, ensemble_mae, best_single_mae}, ...],
-        "summary_by_variable": {variable: {crps, cov80, mae, n_rows, n_days,
-                                           cov80_target_err}},
-        "distinct_dates": [...],
-        "distinct_cities": [{id, name}, ...],
-        "window_days": N,
-      }
-    """
+    """MOS daily skill rows + per-variable summary for the dashboard panel.
+    Query params: days (default 30), variable, city_id."""
     try:
         days = int(request.args.get("days", 30))
     except (TypeError, ValueError):
@@ -773,7 +739,6 @@ def api_mos_skill():
     """
     rows = [dict(r) for r in conn.execute(rows_sql, params).fetchall()]
 
-    # Per-variable aggregates (unweighted average across all rows in the window)
     summary_sql = f"""
         SELECT mds.variable,
                AVG(mds.mos_crps_proxy) AS crps,
@@ -818,15 +783,8 @@ def api_mos_skill():
         ).fetchall()
     ]
 
-    # Cold-start / low-history detection (Council Round 4 Marcus visibility).
-    # A city is "cold-start" if it has zero mos_daily_skill rows in the
-    # selected window. A city is "low-history" if it has rows for fewer than
-    # `min_days_threshold` distinct dates in the window — either because it
-    # was added recently or because its obs backfill is partial.
-    #
-    # Evaluated against the full `cities` table so we can flag cities that
-    # exist in production (are being served forecasts) but have no
-    # accountability loop via the shadow verify.
+    # cold_start: 0 skill rows in window. low_history: <min_days_threshold dates.
+    # Evaluated against full cities table so served-but-unverified cities surface.
     all_cities = [
         {"id": r[0], "name": r[1]}
         for r in conn.execute(
@@ -880,7 +838,6 @@ def health_check():
         "SELECT MAX(fetched_at) FROM forecasts"
     ).fetchone()[0]
 
-    # DB file size
     db_size_mb = None
     if os.path.exists(db.DB_PATH):
         db_size_mb = round(os.path.getsize(db.DB_PATH) / (1024 * 1024), 2)
@@ -903,9 +860,6 @@ def health_check():
         "mos": mos,
     })
 
-# ---------------------------------------------------------------------------
-# Run
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     logger.info("Serving frontend from: %s", _DASHBOARD_DIR)
     logger.info("Auth: %s", "ENABLED" if _API_KEY else "DISABLED (set WEATHER_API_KEY)")
