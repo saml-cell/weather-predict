@@ -210,6 +210,11 @@ def serve_skill():
     return send_from_directory(_DASHBOARD_DIR, "skill.html")
 
 
+@app.route("/polymarket")
+def serve_polymarket():
+    return send_from_directory(_DASHBOARD_DIR, "polymarket.html")
+
+
 @app.route("/<path:path>")
 def serve_static(path):
     if ".." in path or path.startswith("/"):

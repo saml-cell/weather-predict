@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Polymarket Weather — Paper P&L</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            base: { bg: '#141420', card: '#1e1e32', border: '#2a2a45' },
+            gold: { DEFAULT: '#d4a853', dim: '#b8923e', bright: '#e6be6a' },
+            sage: { DEFAULT: '#7c9a6e', dim: '#5e7a52', bright: '#96b488' },
+            rose: { DEFAULT: '#c4746e', dim: '#a05a55', bright: '#d89089' },
+            muted: { DEFAULT: '#8a8697', light: '#e8e4df', dim: '#5c5870' },
+          }
+        }
+      }
+    }
+  </script>
+  <style>
+    @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+    body { margin: 0; background: #141420; color: #e8e4df; font-family: 'DM Sans', sans-serif; }
+    .mono { font-family: 'JetBrains Mono', monospace; }
+    .edge-plus { color: #7c9a6e; }
+    .edge-minus { color: #c4746e; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #2a2a45; font-size: 14px; }
+    th { font-weight: 600; color: #d4a853; background: #1a1a2b; position: sticky; top: 0; }
+    tr:hover td { background: #1a1a2b; }
+  </style>
+</head>
+<body class="min-h-screen">
+  <div class="max-w-6xl mx-auto px-4 py-6">
+    <header class="mb-6">
+      <div class="flex items-center gap-3 mb-1">
+        <span class="text-2xl">🎯</span>
+        <h1 class="text-2xl font-bold text-muted-light">Polymarket Weather</h1>
+        <span class="ml-auto text-xs text-muted mono" id="last-updated">—</span>
+      </div>
+      <p class="text-muted text-sm">
+        Paper-P&L tracker: your MOS vs Polymarket daily-temperature markets.
+        Scan cron: 12:00 UTC · Resolve cron: 08:00 UTC · Bet threshold: |edge| > 8%.
+        <a href="/" class="text-gold hover:underline">← dashboard</a> ·
+        <a href="/skill" class="text-gold hover:underline">skill</a>
+      </p>
+    </header>
+
+    <!-- Summary cards -->
+    <div id="summary" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6"></div>
+
+    <!-- Per-city P&L (only shown once resolved bets exist) -->
+    <section id="bycity-section" class="mb-6 hidden">
+      <h2 class="text-sm font-semibold text-gold mb-2 mono">PER-CITY PAPER P&L</h2>
+      <div id="bycity" class="bg-base-card rounded-lg border border-base-border overflow-hidden"></div>
+    </section>
+
+    <!-- Tomorrow's top edges -->
+    <section class="mb-6">
+      <h2 class="text-sm font-semibold text-gold mb-2 mono">
+        TOP EDGES — <span id="target-date">—</span>
+      </h2>
+      <div class="bg-base-card rounded-lg border border-base-border overflow-x-auto">
+        <table>
+          <thead>
+            <tr>
+              <th>City</th><th>Side</th><th>Bucket</th>
+              <th class="text-right">Mkt YES</th>
+              <th class="text-right">MOS</th>
+              <th class="text-right">Edge</th>
+              <th class="text-right">Vol</th>
+            </tr>
+          </thead>
+          <tbody id="edges-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Cities scanned -->
+    <section class="mb-6">
+      <h2 class="text-sm font-semibold text-gold mb-2 mono">CITY COVERAGE</h2>
+      <div class="bg-base-card rounded-lg border border-base-border overflow-x-auto">
+        <table>
+          <thead>
+            <tr>
+              <th>City</th>
+              <th class="text-right">MOS p50</th>
+              <th class="text-right">Buckets</th>
+              <th class="text-right">Flagged bets</th>
+            </tr>
+          </thead>
+          <tbody id="cities-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="text-center text-muted-dim text-xs mt-10 pb-4">
+      Source: <span class="mono">polymarket_scan</span> · Pipeline:
+      <span class="mono">scripts/polymarket_paper_tracker.py</span>
+    </footer>
+  </div>
+
+  <script>
+    const fmt = (n, d=2) => n == null ? '—' : (+n).toFixed(d);
+    const dollar = (n) => n == null ? '—' : '$' + (+n).toLocaleString('en-US', {maximumFractionDigits: 0});
+    const pct = (n) => n == null ? '—' : (n * 100).toFixed(1) + '%';
+    const signed = (n) => n == null ? '—' : (n >= 0 ? '+' : '') + (+n).toFixed(2);
+
+    async function load() {
+      const res = await fetch('/api/polymarket/status');
+      if (!res.ok) { document.body.innerHTML = '<p class="p-8 text-rose">Status endpoint failed.</p>'; return; }
+      const d = await res.json();
+
+      document.getElementById('last-updated').textContent = new Date().toLocaleTimeString();
+      document.getElementById('target-date').textContent = d.latest_scan_target || '—';
+
+      // Summary cards
+      const pnl = d.paper_pnl || {};
+      const cov = d.coverage || {};
+      const bets = pnl.bets || 0;
+      const totalPnl = pnl.total_pnl ?? null;
+      const pnlColor = totalPnl == null ? 'text-muted' : (totalPnl > 0 ? 'text-sage' : 'text-rose');
+      const cards = [
+        {
+          label: 'DAYS SCANNED', value: cov.scanned || 0,
+          sub: (cov.resolved || 0) + ' resolved'
+        },
+        {
+          label: 'RESOLVED BETS', value: bets,
+          sub: pnl.win_rate_pct != null ? pnl.win_rate_pct + '% win rate' : '—'
+        },
+        {
+          label: 'PAPER P&L',
+          value: bets > 0 ? signed(totalPnl) : '—',
+          sub: bets > 0 ? ('avg ' + signed(pnl.avg_pnl || 0) + '/bet') : 'resolves at 08:00 UTC',
+          color: pnlColor
+        },
+        {
+          label: "TOMORROW'S BETS", value: (d.top_edges || []).length,
+          sub: 'flagged (|edge| > 8%)'
+        },
+      ];
+      document.getElementById('summary').innerHTML = cards.map(c => `
+        <div class="bg-base-card rounded-lg p-4 border border-base-border">
+          <div class="mono text-xs text-muted mb-1">${c.label}</div>
+          <div class="text-2xl font-bold ${c.color || 'text-muted-light'}">${c.value}</div>
+          <div class="text-xs text-muted mt-1">${c.sub || '&nbsp;'}</div>
+        </div>
+      `).join('');
+
+      // Top edges
+      const edges = d.top_edges || [];
+      document.getElementById('edges-body').innerHTML = edges.length === 0
+        ? `<tr><td colspan="7" class="text-muted text-center py-6">No flagged edges.</td></tr>`
+        : edges.map(e => {
+          const edgeClass = e.edge > 0 ? 'edge-plus' : 'edge-minus';
+          return `<tr>
+            <td>${e.city_name}</td>
+            <td><span class="mono ${e.would_bet_side === 'YES' ? 'text-sage' : 'text-rose'}">${e.would_bet_side}</span></td>
+            <td class="mono text-xs">${e.bucket_label}</td>
+            <td class="mono text-right">${fmt(e.market_yes, 3)}</td>
+            <td class="mono text-right">${fmt(e.mos_prob, 3)}</td>
+            <td class="mono text-right ${edgeClass} font-semibold">${signed(e.edge)}</td>
+            <td class="mono text-right text-muted">${dollar(e.market_volume)}</td>
+          </tr>`;
+        }).join('');
+
+      // Cities
+      const cities = d.cities || [];
+      document.getElementById('cities-body').innerHTML = cities.map(c => `
+        <tr>
+          <td>${c.city_name}</td>
+          <td class="mono text-right">${fmt(c.mos_p50, 1)}°C</td>
+          <td class="mono text-right text-muted">${c.buckets}</td>
+          <td class="mono text-right ${c.flagged_bets > 0 ? 'text-gold' : 'text-muted-dim'}">${c.flagged_bets}</td>
+        </tr>
+      `).join('');
+
+      // Per-city P&L (only if there's data)
+      const bycity = d.by_city_pnl || [];
+      if (bycity.length) {
+        document.getElementById('bycity-section').classList.remove('hidden');
+        document.getElementById('bycity').innerHTML = `
+          <table>
+            <thead><tr><th>City</th><th class="text-right">Bets</th><th class="text-right">Wins</th><th class="text-right">P&L</th></tr></thead>
+            <tbody>${bycity.map(r => `
+              <tr>
+                <td>${r.city_name}</td>
+                <td class="mono text-right">${r.bets}</td>
+                <td class="mono text-right text-sage">${r.wins || 0}</td>
+                <td class="mono text-right ${r.pnl > 0 ? 'text-sage' : r.pnl < 0 ? 'text-rose' : 'text-muted'}">${signed(r.pnl)}</td>
+              </tr>`).join('')}</tbody>
+          </table>`;
+      }
+    }
+    load();
+    setInterval(load, 60000); // refresh every minute
+  </script>
+</body>
+</html>
