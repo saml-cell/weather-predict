@@ -429,10 +429,50 @@ def simulate_mos_edge(df: pd.DataFrame,
             })
         per_format[kind] = entry
 
+    # Format × period interaction. Pooled "range is distributed" could
+    # hide a late-period collapse. One groupby answers it.
+    per_fmt_period = {}
+    for kind in ("threshold", "range", "exact"):
+        for pname, pstart, pend in PERIODS:
+            sub = scored_df[(scored_df["kind"] == kind) &
+                            (scored_df["resolution_date"] >= pstart) &
+                            (scored_df["resolution_date"] < pend)]
+            bets = sub[sub["edge"].abs() >= 0.20].copy()
+            if bets.empty:
+                per_fmt_period[f"{kind}_{pname}"] = {"n_candidates": int(len(sub)), "n_bets": 0}
+                continue
+            bets["bet_side"] = np.where(bets["edge"] > 0, "YES", "NO")
+
+            def pnl(row):
+                p = row["yes_price_pre"]
+                if row["bet_side"] == "YES":
+                    return (1.0 / p - 1.0) if row["outcome"] == 1 else -1.0
+                q = 1.0 - p
+                return (1.0 / q - 1.0) if row["outcome"] == 0 else -1.0
+
+            bets["pnl"] = bets.apply(pnl, axis=1)
+            wins = int((bets["pnl"] > 0).sum())
+            n = int(len(bets))
+            per_fmt_period[f"{kind}_{pname}"] = {
+                "n_candidates": int(len(sub)),
+                "n_bets": n,
+                "hit_rate": float(wins / n),
+                "roi": float(bets["pnl"].sum() / n),
+                "total_pnl": float(bets["pnl"].sum()),
+                "top5_pnl": float(bets.nlargest(min(5, n), "pnl")["pnl"].sum()),
+            }
+
+    # Persist full scored frame for ad-hoc slicing without re-loading quant.
+    try:
+        scored_df.to_parquet(PROJECT / "data" / "polymarket_backtest_scored.parquet")
+    except Exception as e:  # pragma: no cover - non-fatal
+        print(f"warning: could not save scored parquet: {e}")
+
     return {
         "per_edge": per_edge,
         "per_period": per_period,
         "per_format": per_format,
+        "per_format_x_period": per_fmt_period,
         "coverage": {
             "paired_total": int(len(df)),
             "parsed_in_tracked": kept,
@@ -561,6 +601,7 @@ def main():
                 "per_edge_threshold": mos_results["per_edge"],
                 "per_period_stability": mos_results["per_period"],
                 "per_format_stability": mos_results["per_format"],
+                "per_format_x_period": mos_results["per_format_x_period"],
                 "parse_coverage": mos_results["coverage"],
             },
         },
