@@ -1,0 +1,33 @@
+2025-H1 vs later periods — root cause analysis
+
+Price and |edge| distributions are nearly identical across periods
+(median yes_price ~0.22, tail-mispriced markets 25-27%). Weather regime
+and MOS skill are not the driver.
+
+The driver is Polymarket's pricing efficiency, and it migrates as new
+cities are added.
+
+Key evidence — 0-10% priced YES bets, edge>=0.20:
+              n   hit   mean_pnl
+  2025-H1    51  27.5%  $3.24
+  2025-H2    61  13.1%  $0.66
+  2026-Q1    69  14.5%  $0.82
+
+Same city, different periods (edge>=0.20):
+  London H1: 237 bets, hit 28.7%, mean +$0.37
+  London Q1: 156 bets, hit 34.0%, mean -$0.24   (turned negative)
+  NYC    H1:  58 bets, hit 36.2%, mean +$1.66
+  NYC    Q1:  81 bets, hit 28.4%, mean +$0.16   (collapsed 10x)
+
+2026-Q1 per-city — edge migrates to newer-tracked cities:
+  London      -$37 (arbed)
+  Chicago     -$15 (arbed)
+  Paris       +$52 (newer Polymarket market)
+  Seoul       +$31
+  Tokyo       +$22
+  Sao Paulo   +$21
+
+This is a "moving efficient frontier" — Polymarket prices London/NYC
+well by late 2025; MOS's edge persists in newer-tracked cities. The
+next wave of arbitrage will likely compress Paris/Seoul/Tokyo by
+2026-Q3.
