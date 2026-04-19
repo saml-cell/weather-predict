@@ -1,0 +1,15 @@
+{
+  "Chicago": "era_3_new",
+  "Dubai": "era_1_established",
+  "London": "era_1_established",
+  "Los Angeles": "era_3_new",
+  "Madrid": "era_3_new",
+  "NYC": "era_1_established",
+  "New York City": "era_1_established",
+  "Paris": "era_3_new",
+  "Sao Paulo": "era_3_new",
+  "Seoul": "era_2_mid",
+  "Singapore": "era_3_new",
+  "Tokyo": "era_3_new",
+  "Warsaw": "era_3_new"
+}
