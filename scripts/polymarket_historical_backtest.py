@@ -22,8 +22,12 @@ and runs multiple strategies:
      sees the 00 UTC forecast of resolution day while market price is
      captured 24h pre-close — ~12h MOS freshness advantage; (2) at high
      edge thresholds, top 5 bets carry >70% of total PnL — signal may be
-     jackpot-driven. Restricted to threshold-format markets in the 57
-     tracked cities (~588 paired markets).
+     jackpot-driven. Covers all three market formats (threshold "X° or
+     below/higher", exact "be X°", range "be between X-Y°") in the 57
+     tracked cities. For exact/range, assumes Polymarket resolves on the
+     nearest-integer rounded official daily high — exact "be 9°C"
+     corresponds to high ∈ [8.5°C, 9.5°C); range "be between 46-47°F"
+     corresponds to high ∈ [45.5°F, 47.5°F).
 
 Output: ~/Weather predict program/data/polymarket_historical_backtest.json
 
@@ -68,14 +72,42 @@ MOS_FORECAST_COLS = [
 ]
 MOS_SOURCES = ("gfs_global", "icon_seamless", "jma_seamless", "ecmwf_ifs025")
 
-# Regex for parsing threshold-format weather temperature markets.
+# Regexes for the three weather-temperature market formats.
 # Examples:
-#   "Will the highest temperature in New York City be 76°F or below on August 2?"
-#   "Will the highest temperature in Chicago be 34°F or higher on February 2?"
+#   "Will the highest temperature in New York City be 76°F or below on August 2?"  (threshold)
+#   "Will the highest temperature in Chicago be 34°F or higher on February 2?"     (threshold)
+#   "Will the highest temperature in Miami be between 86-87°F on March 24?"        (range)
+#   "Will the highest temperature in Beijing be 21°C on March 24?"                 (exact)
+# Order matters: "between" must be tried before the bare "be N°" pattern.
+RANGE_RE = re.compile(
+    r"highest temperature in (.+?) be between (\d+)[-–](\d+)°([CF]) on",
+    re.IGNORECASE,
+)
 THRESHOLD_RE = re.compile(
     r"highest temperature in (.+?) be (\d+)°([CF]) or (below|higher) on",
     re.IGNORECASE,
 )
+EXACT_RE = re.compile(
+    r"highest temperature in (.+?) be (\d+)°([CF]) on",
+    re.IGNORECASE,
+)
+
+# Polymarket resolves on the official integer-rounded daily high, so a
+# question of "be 9°C" covers high ∈ [8.5°C, 9.5°C) and "be between 46-47°F"
+# covers high ∈ [45.5°F, 47.5°F). A threshold question "X° or below" means
+# high ≤ X after rounding, i.e. T < X + 0.5 unit. The same 0.5-unit half-
+# bucket is baked into the threshold boundaries below so all three formats
+# share one convention.
+INF = float("inf")
+
+
+def _half_bucket_c(unit: str) -> float:
+    return 0.5 if unit.upper() == "C" else (0.5 * 5.0 / 9.0)  # ≈ 0.2778°C
+
+
+def _to_c(value: int, unit: str) -> float:
+    return float(value) if unit.upper() == "C" else (value - 32.0) * 5.0 / 9.0
+
 
 # City name variants that differ between Polymarket questions and the
 # weather.db `cities.name` column.
@@ -85,17 +117,40 @@ CITY_ALIASES = {
 }
 
 
-def parse_threshold(question: str) -> dict | None:
+def parse_market(question: str) -> dict | None:
+    """Parse a weather temperature question into a normalized (low_c, high_c)
+    YES-range in °C. Try range first (keyword "between"), then threshold
+    ("or below/higher"), then bare exact ("be N°"). Returns None if none match.
+    """
+    m = RANGE_RE.search(question)
+    if m:
+        city_raw, a, b, unit = m.group(1).strip(), int(m.group(2)), int(m.group(3)), m.group(4)
+        half = _half_bucket_c(unit)
+        return {
+            "kind": "range",
+            "city_raw": city_raw,
+            "low_c": _to_c(a, unit) - half,
+            "high_c": _to_c(b, unit) + half,
+        }
     m = THRESHOLD_RE.search(question)
-    if not m:
-        return None
-    city_raw, val, unit, direction = m.group(1).strip(), int(m.group(2)), m.group(3).upper(), m.group(4).lower()
-    threshold_c = val if unit == "C" else (val - 32.0) * 5.0 / 9.0
-    return {
-        "city_raw": city_raw,
-        "threshold_c": float(threshold_c),
-        "direction": direction,  # "below" → YES means temp <= threshold
-    }
+    if m:
+        city_raw, v, unit, direction = m.group(1).strip(), int(m.group(2)), m.group(3), m.group(4).lower()
+        half = _half_bucket_c(unit)
+        v_c = _to_c(v, unit)
+        if direction == "below":    # high ≤ X  →  T < X + 0.5 unit
+            return {"kind": "threshold", "city_raw": city_raw,
+                    "low_c": -INF, "high_c": v_c + half}
+        else:                       # high ≥ X  →  T ≥ X - 0.5 unit
+            return {"kind": "threshold", "city_raw": city_raw,
+                    "low_c": v_c - half, "high_c": INF}
+    m = EXACT_RE.search(question)
+    if m:
+        city_raw, v, unit = m.group(1).strip(), int(m.group(2)), m.group(3)
+        half = _half_bucket_c(unit)
+        v_c = _to_c(v, unit)
+        return {"kind": "exact", "city_raw": city_raw,
+                "low_c": v_c - half, "high_c": v_c + half}
+    return None
 
 
 def load_city_map(conn: sqlite3.Connection) -> dict[str, int]:
@@ -132,21 +187,21 @@ def fetch_ensemble_long(conn: sqlite3.Connection, city_id: int,
     return df
 
 
-def gaussian_p_le(p10: float, p50: float, p90: float, threshold: float) -> float:
-    """Return P(T <= threshold) assuming T ~ N(p50, sigma) with sigma fit
-    through the 10/90 quantiles. Degenerate widths fall back to a 0.1°C
-    floor so the CDF never divides by zero.
+def _gaussian_cdf(x: float, mu: float, sigma: float) -> float:
+    if x == -INF:
+        return 0.0
+    if x == INF:
+        return 1.0
+    return 0.5 * (1.0 + math.erf((x - mu) / (sigma * math.sqrt(2.0))))
+
+
+def gaussian_p_in_range(p10: float, p50: float, p90: float,
+                          low_c: float, high_c: float) -> float:
+    """P(low_c <= T <= high_c) assuming T ~ N(p50, sigma) with sigma fit
+    through the 10/90 quantiles. Handles ±INF bounds for threshold markets.
     """
     sigma = max((p90 - p10) / (2.0 * 1.2815515655446004), 0.1)
-    z = (threshold - p50) / sigma
-    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
-
-
-def mos_p_yes(p10: float, p50: float, p90: float,
-              threshold_c: float, direction: str) -> float:
-    """Convert MOS temp_high quantiles into P(market resolves YES)."""
-    p_le = gaussian_p_le(p10, p50, p90, threshold_c)
-    return p_le if direction == "below" else (1.0 - p_le)
+    return _gaussian_cdf(high_c, p50, sigma) - _gaussian_cdf(low_c, p50, sigma)
 
 
 def simulate(df: pd.DataFrame, predicate) -> dict:
@@ -185,21 +240,21 @@ def simulate(df: pd.DataFrame, predicate) -> dict:
 
 def simulate_mos_edge(df: pd.DataFrame,
                        edge_thresholds: tuple[float, ...] = (0.10,)) -> dict:
-    """Score every threshold-format, tracked-city market in `df` against the
-    production MOS ensemble. Returns coverage stats and per-edge-threshold
-    P&L. Cached by (city_id, resolution_date) so one prediction serves all
-    markets on the same day.
+    """Score every tracked-city market in `df` (threshold + exact + range
+    formats) against the production MOS ensemble. Returns coverage stats,
+    per-edge-threshold P&L, per-format breakdown, per-period stability.
+    Cached by (city_id, resolution_date) so one MOS prediction serves all
+    markets sharing the same day in the same city.
     """
     conn = sqlite3.connect(str(DB))
     city_map = load_city_map(conn)
 
     parsed_rows = []
     total = len(df)
-    kept = 0
     unparsed = 0
     untracked = 0
     for row in df.itertuples(index=False):
-        p = parse_threshold(row.question)
+        p = parse_market(row.question)
         if p is None:
             unparsed += 1
             continue
@@ -213,16 +268,17 @@ def simulate_mos_edge(df: pd.DataFrame,
             "outcome": int(row.outcome),
             "yes_price_pre": float(row.yes_price_pre),
             "question": row.question,
+            "kind": p["kind"],
             "city_raw": p["city_raw"],
             "city_id": int(cid),
-            "threshold_c": p["threshold_c"],
-            "direction": p["direction"],
+            "low_c": p["low_c"],
+            "high_c": p["high_c"],
             "resolution_date": resolution_date,
         })
-        kept += 1
-
-    print(f"MOS-candidate markets: threshold-format + tracked-city = {kept:,} "
-          f"of {total:,} paired ({unparsed:,} unparsed, {untracked:,} untracked)")
+    kept = len(parsed_rows)
+    by_kind = pd.Series([r["kind"] for r in parsed_rows]).value_counts().to_dict() if parsed_rows else {}
+    print(f"MOS-candidate markets: tracked-city parsed = {kept:,} of {total:,} paired "
+          f"(by format: {by_kind}; {unparsed:,} unparsed, {untracked:,} untracked)")
 
     scored = []
     skipped_no_fcst = 0
@@ -249,7 +305,7 @@ def simulate_mos_edge(df: pd.DataFrame,
             skipped_no_fcst += 1
             continue
         p10, p50, p90 = triple
-        p_yes = mos_p_yes(p10, p50, p90, rec["threshold_c"], rec["direction"])
+        p_yes = gaussian_p_in_range(p10, p50, p90, rec["low_c"], rec["high_c"])
         edge = p_yes - rec["yes_price_pre"]
         scored.append({
             **rec,
@@ -342,12 +398,45 @@ def simulate_mos_edge(df: pd.DataFrame,
             })
         per_period[name] = window_stats
 
+    # Per-format stability at edge >= 0.20. If the widened formats (range,
+    # exact) post wildly different ROIs from threshold, the Polymarket
+    # rounding assumption is probably wrong and needs revisiting.
+    per_format = {}
+    for kind in ("threshold", "range", "exact"):
+        sub = scored_df[scored_df["kind"] == kind].copy()
+        bets = sub[sub["edge"].abs() >= 0.20].copy()
+        entry = {"n_candidates": int(len(sub)), "n_bets": int(len(bets))}
+        if not bets.empty:
+            bets["bet_side"] = np.where(bets["edge"] > 0, "YES", "NO")
+
+            def pnl(row):
+                p = row["yes_price_pre"]
+                if row["bet_side"] == "YES":
+                    return (1.0 / p - 1.0) if row["outcome"] == 1 else -1.0
+                q = 1.0 - p
+                return (1.0 / q - 1.0) if row["outcome"] == 0 else -1.0
+
+            bets["pnl"] = bets.apply(pnl, axis=1)
+            wins = int((bets["pnl"] > 0).sum())
+            entry.update({
+                "total_pnl": float(bets["pnl"].sum()),
+                "mean_pnl_per_bet": float(bets["pnl"].mean()),
+                "roi": float(bets["pnl"].sum() / len(bets)),
+                "hit_rate": float(wins / len(bets)),
+                "wins": wins,
+                "losses": int(len(bets) - wins),
+                "top5_pnl": float(bets.nlargest(min(5, len(bets)), "pnl")["pnl"].sum()),
+            })
+        per_format[kind] = entry
+
     return {
         "per_edge": per_edge,
         "per_period": per_period,
+        "per_format": per_format,
         "coverage": {
             "paired_total": int(len(df)),
-            "parsed_threshold_in_tracked": kept,
+            "parsed_in_tracked": kept,
+            "by_format_candidates": by_kind,
             "unparsed": unparsed,
             "untracked": untracked,
             "scored": len(scored),
@@ -412,9 +501,9 @@ def main():
     roi_ceiling = ceil["total_pnl"] / total_invested_ceiling if total_invested_ceiling > 0 else None
 
     # ---- Strategy 5: MOS edge (Phase 2) -------------------------------
-    # Restrict to threshold-format markets in tracked cities, derive a
-    # Gaussian P(YES) from the production MOS temp-high quantiles, and
-    # bet whenever |P_MOS - yes_price_pre| >= edge threshold.
+    # Cover all three tracked-city market formats (threshold / exact /
+    # range). For each market, derive a Gaussian P(YES) from the production
+    # MOS temp-high quantiles and bet when |P_MOS - yes_price_pre| >= edge.
     mos_results = simulate_mos_edge(df, edge_thresholds=(0.05, 0.10, 0.15, 0.20))
 
     report = {
@@ -443,8 +532,9 @@ def main():
             "mos_edge": {
                 "description": (
                     "OUT-OF-SAMPLE. bet when |P_MOS - yes_price_pre| >= edge. "
-                    "P_MOS = Gaussian(µ=temp_high_p50, σ=(p90-p10)/2.5631). "
-                    "threshold-format, tracked-city markets only."
+                    "P_MOS = Gaussian(µ=temp_high_p50, σ=(p90-p10)/2.5631) "
+                    "evaluated on the YES-range [low_c, high_c] decoded from "
+                    "the question. threshold/exact/range tracked-city markets."
                 ),
                 "out_of_sample_evidence": (
                     "production v3.1 booster has train_end=2023-12-31, "
@@ -470,6 +560,7 @@ def main():
                 ],
                 "per_edge_threshold": mos_results["per_edge"],
                 "per_period_stability": mos_results["per_period"],
+                "per_format_stability": mos_results["per_format"],
                 "parse_coverage": mos_results["coverage"],
             },
         },

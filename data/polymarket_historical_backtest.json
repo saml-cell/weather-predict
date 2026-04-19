@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-19T10:18:13.525149+00:00",
+  "generated_at": "2026-04-19T10:43:01.347897+00:00",
   "n_markets_analysed": 7033,
   "min_prob_for_bet": 0.05,
   "max_prob_for_bet": 0.95,
@@ -42,7 +42,7 @@
       "losses": 1574
     },
     "mos_edge": {
-      "description": "OUT-OF-SAMPLE. bet when |P_MOS - yes_price_pre| >= edge. P_MOS = Gaussian(\u00b5=temp_high_p50, \u03c3=(p90-p10)/2.5631). threshold-format, tracked-city markets only.",
+      "description": "OUT-OF-SAMPLE. bet when |P_MOS - yes_price_pre| >= edge. P_MOS = Gaussian(\u00b5=temp_high_p50, \u03c3=(p90-p10)/2.5631) evaluated on the YES-range [low_c, high_c] decoded from the question. threshold/exact/range tracked-city markets.",
       "out_of_sample_evidence": "production v3.1 booster has train_end=2023-12-31, val_end=2024-12-31, test_end=2025-12-31. the 318 scored markets all resolved in Jan 2025 \u2013 Mar 2026, so none were in train or val. isotonic calibrators were fit on 2024 val; temp_c calibrator is pinned off per Council R4 Step 2, so temp predictions are raw booster output.",
       "caveats": [
         "MOS issue_time = 00 UTC of resolution day; market price is 24h pre-close \u2014 MOS sees ~12h fresher data than the price snapshot (small but nonzero leak)",
@@ -52,97 +52,137 @@
       "per_edge_threshold": {
         "0.05": {
           "edge_threshold": 0.05,
-          "n_bets": 257,
-          "total_pnl": 94.03336518849022,
-          "mean_pnl_per_bet": 0.365888580499962,
-          "roi": 0.365888580499962,
-          "hit_rate": 0.642023346303502,
-          "wins": 165,
-          "losses": 92,
-          "bet_yes_share": 0.3540856031128405
+          "n_bets": 3156,
+          "total_pnl": 686.5769739781342,
+          "mean_pnl_per_bet": 0.21754656970156344,
+          "roi": 0.21754656970156344,
+          "hit_rate": 0.5681242078580482,
+          "wins": 1793,
+          "losses": 1363,
+          "bet_yes_share": 0.35297845373891
         },
         "0.10": {
           "edge_threshold": 0.1,
-          "n_bets": 171,
-          "total_pnl": 94.30988707437422,
-          "mean_pnl_per_bet": 0.5515198074524807,
-          "roi": 0.5515198074524807,
-          "hit_rate": 0.52046783625731,
-          "wins": 89,
-          "losses": 82,
-          "bet_yes_share": 0.4619883040935672
+          "n_bets": 2341,
+          "total_pnl": 612.2080092826434,
+          "mean_pnl_per_bet": 0.26151559559275667,
+          "roi": 0.26151559559275667,
+          "hit_rate": 0.5322511747116617,
+          "wins": 1246,
+          "losses": 1095,
+          "bet_yes_share": 0.3724903887227681
         },
         "0.15": {
           "edge_threshold": 0.15,
-          "n_bets": 144,
-          "total_pnl": 93.73608695686681,
-          "mean_pnl_per_bet": 0.6509450483115751,
-          "roi": 0.6509450483115751,
-          "hit_rate": 0.4652777777777778,
-          "wins": 67,
-          "losses": 77,
-          "bet_yes_share": 0.4930555555555556
+          "n_bets": 1804,
+          "total_pnl": 500.2698430731058,
+          "mean_pnl_per_bet": 0.2773114429451806,
+          "roi": 0.2773114429451806,
+          "hit_rate": 0.5099778270509978,
+          "wins": 920,
+          "losses": 884,
+          "bet_yes_share": 0.37971175166297116
         },
         "0.20": {
           "edge_threshold": 0.2,
-          "n_bets": 128,
-          "total_pnl": 94.59334622256787,
-          "mean_pnl_per_bet": 0.7390105173638115,
-          "roi": 0.7390105173638115,
-          "hit_rate": 0.4296875,
-          "wins": 55,
-          "losses": 73,
-          "bet_yes_share": 0.5234375
+          "n_bets": 1379,
+          "total_pnl": 442.8409519178234,
+          "mean_pnl_per_bet": 0.3211319448280083,
+          "roi": 0.3211319448280083,
+          "hit_rate": 0.49238578680203043,
+          "wins": 679,
+          "losses": 700,
+          "bet_yes_share": 0.3828861493836113
         }
       },
       "per_period_stability": {
         "2025-H1": {
           "start": "2025-01-01",
           "end": "2025-07-01",
-          "n_candidates": 88,
-          "n_bets": 29,
-          "total_pnl": 53.09881910437469,
-          "mean_pnl_per_bet": 1.830993762219817,
-          "roi": 1.830993762219817,
-          "hit_rate": 0.5517241379310345,
-          "wins": 16,
-          "losses": 13,
-          "top5_pnl": 54.991561181434584
+          "n_candidates": 1032,
+          "n_bets": 398,
+          "total_pnl": 285.96443336569087,
+          "mean_pnl_per_bet": 0.7185036014213338,
+          "roi": 0.7185036014213338,
+          "hit_rate": 0.5753768844221105,
+          "wins": 229,
+          "losses": 169,
+          "top5_pnl": 95.0
         },
         "2025-H2": {
           "start": "2025-07-01",
           "end": "2026-01-01",
-          "n_candidates": 70,
-          "n_bets": 22,
-          "total_pnl": 16.975941619624365,
-          "mean_pnl_per_bet": 0.7716337099829257,
-          "roi": 0.7716337099829257,
-          "hit_rate": 0.5454545454545454,
-          "wins": 12,
-          "losses": 10,
-          "top5_pnl": 21.607879161874845
+          "n_candidates": 1148,
+          "n_bets": 427,
+          "total_pnl": 70.997903966985,
+          "mean_pnl_per_bet": 0.16627143786179158,
+          "roi": 0.16627143786179158,
+          "hit_rate": 0.4309133489461358,
+          "wins": 184,
+          "losses": 243,
+          "top5_pnl": 66.23015873015875
         },
         "2026-Q1": {
           "start": "2026-01-01",
           "end": "2026-04-01",
-          "n_candidates": 160,
-          "n_bets": 77,
-          "total_pnl": 24.51858549856882,
-          "mean_pnl_per_bet": 0.31842318829310157,
-          "roi": 0.31842318829310157,
-          "hit_rate": 0.35064935064935066,
-          "wins": 27,
-          "losses": 50,
-          "top5_pnl": 44.35897435897436
+          "n_candidates": 1689,
+          "n_bets": 554,
+          "total_pnl": 85.87861458514756,
+          "mean_pnl_per_bet": 0.15501554979268511,
+          "roi": 0.15501554979268511,
+          "hit_rate": 0.48014440433212996,
+          "wins": 266,
+          "losses": 288,
+          "top5_pnl": 63.45238095238095
+        }
+      },
+      "per_format_stability": {
+        "threshold": {
+          "n_candidates": 318,
+          "n_bets": 129,
+          "total_pnl": 93.45877524745232,
+          "mean_pnl_per_bet": 0.7244866298252118,
+          "roi": 0.7244866298252118,
+          "hit_rate": 0.4418604651162791,
+          "wins": 57,
+          "losses": 72,
+          "top5_pnl": 69.32489451476792
+        },
+        "range": {
+          "n_candidates": 2470,
+          "n_bets": 859,
+          "total_pnl": 275.4377350087556,
+          "mean_pnl_per_bet": 0.3206492840614152,
+          "roi": 0.3206492840614152,
+          "hit_rate": 0.4970896391152503,
+          "wins": 427,
+          "losses": 432,
+          "top5_pnl": 95.0
+        },
+        "exact": {
+          "n_candidates": 1081,
+          "n_bets": 391,
+          "total_pnl": 73.94444166161543,
+          "mean_pnl_per_bet": 0.18911621908341542,
+          "roi": 0.18911621908341542,
+          "hit_rate": 0.49872122762148335,
+          "wins": 195,
+          "losses": 196,
+          "top5_pnl": 60.67460317460318
         }
       },
       "parse_coverage": {
         "paired_total": 7033,
-        "parsed_threshold_in_tracked": 588,
-        "unparsed": 6280,
-        "untracked": 165,
-        "scored": 318,
-        "skipped_no_forecast": 270
+        "parsed_in_tracked": 5606,
+        "by_format_candidates": {
+          "range": 3621,
+          "exact": 1397,
+          "threshold": 588
+        },
+        "unparsed": 269,
+        "untracked": 1158,
+        "scored": 3869,
+        "skipped_no_forecast": 1737
       }
     }
   }
