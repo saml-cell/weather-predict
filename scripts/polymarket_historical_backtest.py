@@ -3,21 +3,24 @@
 Uses the ~/polymarket-data library to pull the full history of closed
 weather temperature markets (Jan 2025 → Apr 2026, ~17,785 clean-resolved
 markets), joins them to 24-hour pre-close market prices from quant.parquet,
-and answers two bounded questions:
+and runs multiple strategies:
 
-  1. CEILING: if a perfect-foresight oracle had bet $1 on the actual
-     outcome of every market, what P&L would it have earned?
-     This is the absolute upper bound on any forecaster's P&L.
-
-  2. BASELINE: if a naive "bet on whichever side the market priced below
-     50%" rule traded instead, what P&L? (This is the "contrarian"
-     strategy — assumes market is a coinflip, always takes the underpriced
-     side.)
-
-  3. THRESHOLD FILTER: ceiling P&L conditional on market YES < 0.20 for
-     the winner — i.e., only count the mispricing headroom, not the trivial
-     gains from known outcomes. This is the real "how much does a model
-     need to beat" number.
+  1. CEILING: bet $1 on the known winner. Upper bound on any forecaster.
+  2. MISPRICING-ONLY CEILING: ceiling restricted to winner ≤ 20% priced.
+  3. NAIVE CONTRARIAN: always bet the side priced below 0.50.
+  4. MARKET MAJORITY: always bet the side priced above 0.50.
+  5. MOS EDGE (Phase 2): bet the side where the production MOS model
+     disagrees with the market by >= edge threshold. For each market, the
+     MOS p10/p50/p90 of the day's high temperature is computed from the
+     00-UTC ensemble forecast stored in data/weather.db (issue_time = 00
+     UTC of the resolution date, matching the MOS training convention).
+     A Gaussian is fit through the three quantiles to compute
+     P(YES) = P(temp <= threshold) or P(temp >= threshold); edge = P_MOS -
+     yes_price_pre. IN-SAMPLE caveat: the current v3.1 boosters were
+     trained on data spanning the same date range — this is a ceiling on
+     what MOS could theoretically extract, not a tradable expectation.
+     Walk-forward re-training is Phase 2b. Restricted to threshold-format
+     markets in the 57 tracked cities (~588 paired markets).
 
 Output: ~/Weather predict program/data/polymarket_historical_backtest.json
 
@@ -26,11 +29,19 @@ This replaces N weeks of live paper-trading with ~minutes of compute.
 from __future__ import annotations
 
 import json
+import math
+import re
+import sqlite3
 import sys
 from pathlib import Path
 
 sys.path.insert(0, "/home/samko/polymarket-data/src")
 sys.path.insert(0, "/home/samko/polymarket-data/analysis")
+
+PROJECT = Path(__file__).resolve().parent.parent
+# Reach the project's scripts/ dir so we can import mos_inference (which
+# handles its own venv bootstrap for lightgbm).
+sys.path.insert(0, str(PROJECT / "scripts"))
 
 import numpy as np
 import pandas as pd
@@ -40,11 +51,99 @@ from _common import (  # noqa: E402
     clean_resolved, load_markets, load_quant_for_markets,
     price_before_close, tag_segments,
 )
+import mos_inference  # noqa: E402
 
-PROJECT = Path(__file__).resolve().parent.parent
 OUT = PROJECT / "data" / "polymarket_historical_backtest.json"
+DB = PROJECT / "data" / "weather.db"
 MIN_PROB_FOR_BET = 0.05   # skip tiny prices (high transaction cost, low info)
 MAX_PROB_FOR_BET = 0.95
+
+MOS_FORECAST_COLS = [
+    "valid_time", "source", "temp_c", "humidity_pct", "precip_mm",
+    "wind_speed_kmh", "dew_point_c", "pressure_msl_hpa", "cloud_cover_pct",
+    "wind_dir_deg",
+]
+MOS_SOURCES = ("gfs_global", "icon_seamless", "jma_seamless", "ecmwf_ifs025")
+
+# Regex for parsing threshold-format weather temperature markets.
+# Examples:
+#   "Will the highest temperature in New York City be 76°F or below on August 2?"
+#   "Will the highest temperature in Chicago be 34°F or higher on February 2?"
+THRESHOLD_RE = re.compile(
+    r"highest temperature in (.+?) be (\d+)°([CF]) or (below|higher) on",
+    re.IGNORECASE,
+)
+
+# City name variants that differ between Polymarket questions and the
+# weather.db `cities.name` column.
+CITY_ALIASES = {
+    "New York City": "New York",
+    "NYC": "New York",
+}
+
+
+def parse_threshold(question: str) -> dict | None:
+    m = THRESHOLD_RE.search(question)
+    if not m:
+        return None
+    city_raw, val, unit, direction = m.group(1).strip(), int(m.group(2)), m.group(3).upper(), m.group(4).lower()
+    threshold_c = val if unit == "C" else (val - 32.0) * 5.0 / 9.0
+    return {
+        "city_raw": city_raw,
+        "threshold_c": float(threshold_c),
+        "direction": direction,  # "below" → YES means temp <= threshold
+    }
+
+
+def load_city_map(conn: sqlite3.Connection) -> dict[str, int]:
+    rows = conn.execute("SELECT name, id FROM cities").fetchall()
+    m = {name: cid for name, cid in rows}
+    for alias, canonical in CITY_ALIASES.items():
+        if canonical in m:
+            m[alias] = m[canonical]
+    return m
+
+
+def fetch_ensemble_long(conn: sqlite3.Connection, city_id: int,
+                         resolution_date: str) -> pd.DataFrame:
+    """Return long-format ensemble forecast for issue_time = 00 UTC of
+    `resolution_date` (ISO YYYY-MM-DD). Empty if data is missing.
+    """
+    issue = f"{resolution_date}T00:00:00+00:00"
+    cols = ",".join(MOS_FORECAST_COLS)
+    q = f"""
+        SELECT {cols}
+        FROM forecasts_hourly
+        WHERE city_id = ?
+          AND issue_time = ?
+          AND source IN ({",".join(["?"] * len(MOS_SOURCES))})
+          AND date(valid_time) = ?
+    """
+    df = pd.read_sql_query(
+        q, conn,
+        params=[city_id, issue, *MOS_SOURCES, resolution_date],
+    )
+    if df.empty:
+        return df
+    df["valid_time"] = pd.to_datetime(df["valid_time"], utc=True)
+    return df
+
+
+def gaussian_p_le(p10: float, p50: float, p90: float, threshold: float) -> float:
+    """Return P(T <= threshold) assuming T ~ N(p50, sigma) with sigma fit
+    through the 10/90 quantiles. Degenerate widths fall back to a 0.1°C
+    floor so the CDF never divides by zero.
+    """
+    sigma = max((p90 - p10) / (2.0 * 1.2815515655446004), 0.1)
+    z = (threshold - p50) / sigma
+    return 0.5 * (1.0 + math.erf(z / math.sqrt(2.0)))
+
+
+def mos_p_yes(p10: float, p50: float, p90: float,
+              threshold_c: float, direction: str) -> float:
+    """Convert MOS temp_high quantiles into P(market resolves YES)."""
+    p_le = gaussian_p_le(p10, p50, p90, threshold_c)
+    return p_le if direction == "below" else (1.0 - p_le)
 
 
 def simulate(df: pd.DataFrame, predicate) -> dict:
@@ -81,6 +180,136 @@ def simulate(df: pd.DataFrame, predicate) -> dict:
     }
 
 
+def simulate_mos_edge(df: pd.DataFrame,
+                       edge_thresholds: tuple[float, ...] = (0.10,)) -> dict:
+    """Score every threshold-format, tracked-city market in `df` against the
+    production MOS ensemble. Returns coverage stats and per-edge-threshold
+    P&L. Cached by (city_id, resolution_date) so one prediction serves all
+    markets on the same day.
+    """
+    conn = sqlite3.connect(str(DB))
+    city_map = load_city_map(conn)
+
+    parsed_rows = []
+    total = len(df)
+    kept = 0
+    unparsed = 0
+    untracked = 0
+    for row in df.itertuples(index=False):
+        p = parse_threshold(row.question)
+        if p is None:
+            unparsed += 1
+            continue
+        cid = city_map.get(p["city_raw"])
+        if cid is None:
+            untracked += 1
+            continue
+        resolution_date = pd.to_datetime(row.end_date).strftime("%Y-%m-%d")
+        parsed_rows.append({
+            "market_id": row.market_id,
+            "outcome": int(row.outcome),
+            "yes_price_pre": float(row.yes_price_pre),
+            "question": row.question,
+            "city_raw": p["city_raw"],
+            "city_id": int(cid),
+            "threshold_c": p["threshold_c"],
+            "direction": p["direction"],
+            "resolution_date": resolution_date,
+        })
+        kept += 1
+
+    print(f"MOS-candidate markets: threshold-format + tracked-city = {kept:,} "
+          f"of {total:,} paired ({unparsed:,} unparsed, {untracked:,} untracked)")
+
+    scored = []
+    skipped_no_fcst = 0
+    cache: dict[tuple[int, str], tuple[float, float, float] | None] = {}
+    for rec in parsed_rows:
+        key = (rec["city_id"], rec["resolution_date"])
+        if key not in cache:
+            long_df = fetch_ensemble_long(conn, rec["city_id"], rec["resolution_date"])
+            if long_df.empty or len(long_df) < 24 * 2:
+                cache[key] = None
+            else:
+                hourly = mos_inference.predict_hourly(long_df, rec["city_id"])
+                if hourly.empty or "temp_c_p50" not in hourly.columns:
+                    cache[key] = None
+                else:
+                    daily = mos_inference.aggregate_to_daily(hourly)
+                    d = daily.get(rec["resolution_date"])
+                    if not d or any(d.get(k) is None for k in ("temp_high_p10", "temp_high_p50", "temp_high_p90")):
+                        cache[key] = None
+                    else:
+                        cache[key] = (d["temp_high_p10"], d["temp_high_p50"], d["temp_high_p90"])
+        triple = cache[key]
+        if triple is None:
+            skipped_no_fcst += 1
+            continue
+        p10, p50, p90 = triple
+        p_yes = mos_p_yes(p10, p50, p90, rec["threshold_c"], rec["direction"])
+        edge = p_yes - rec["yes_price_pre"]
+        scored.append({
+            **rec,
+            "p10": p10, "p50": p50, "p90": p90,
+            "mos_p_yes": p_yes, "edge": edge,
+        })
+
+    print(f"scored markets: {len(scored):,}  "
+          f"(skipped {skipped_no_fcst:,} w/ no historical forecast)")
+    conn.close()
+    if not scored:
+        return {"per_edge": {}, "coverage": {
+            "parsed_threshold_in_tracked": kept,
+            "scored": 0,
+            "skipped_no_forecast": skipped_no_fcst,
+        }}
+
+    scored_df = pd.DataFrame(scored)
+
+    per_edge = {}
+    for thr in edge_thresholds:
+        betters = scored_df[scored_df["edge"].abs() >= thr].copy()
+        if betters.empty:
+            per_edge[f"{thr:.2f}"] = {"n_bets": 0}
+            continue
+        # bet YES if MOS thinks YES more likely than the market; else NO
+        betters["bet_side"] = np.where(betters["edge"] > 0, "YES", "NO")
+
+        def pnl(row):
+            p = row["yes_price_pre"]
+            if row["bet_side"] == "YES":
+                return (1.0 / p - 1.0) if row["outcome"] == 1 else -1.0
+            q = 1.0 - p
+            return (1.0 / q - 1.0) if row["outcome"] == 0 else -1.0
+
+        betters["pnl"] = betters.apply(pnl, axis=1)
+        wins = int((betters["pnl"] > 0).sum())
+        n = int(len(betters))
+        per_edge[f"{thr:.2f}"] = {
+            "edge_threshold": thr,
+            "n_bets": n,
+            "total_pnl": float(betters["pnl"].sum()),
+            "mean_pnl_per_bet": float(betters["pnl"].mean()),
+            "roi": float(betters["pnl"].sum() / n),
+            "hit_rate": float(wins / n),
+            "wins": wins,
+            "losses": n - wins,
+            "bet_yes_share": float((betters["bet_side"] == "YES").mean()),
+        }
+
+    return {
+        "per_edge": per_edge,
+        "coverage": {
+            "paired_total": int(len(df)),
+            "parsed_threshold_in_tracked": kept,
+            "unparsed": unparsed,
+            "untracked": untracked,
+            "scored": len(scored),
+            "skipped_no_forecast": skipped_no_fcst,
+        },
+    }
+
+
 def main():
     print("loading markets …")
     if not (Path.home() / "polymarket-data/cache/markets.parquet").exists():
@@ -101,7 +330,7 @@ def main():
     print(f"loaded {len(trades):,} trades")
 
     pre = price_before_close(trades, w, hours_before=24)
-    df = w[["id", "outcome", "question"]].rename(
+    df = w[["id", "outcome", "question", "end_date"]].rename(
         columns={"id": "market_id"}
     ).merge(pre, on="market_id", how="inner")
     df = df[(df["yes_price_pre"] >= MIN_PROB_FOR_BET) &
@@ -136,6 +365,12 @@ def main():
     total_invested_ceiling = float(ceil["n_bets"])
     roi_ceiling = ceil["total_pnl"] / total_invested_ceiling if total_invested_ceiling > 0 else None
 
+    # ---- Strategy 5: MOS edge (Phase 2) -------------------------------
+    # Restrict to threshold-format markets in tracked cities, derive a
+    # Gaussian P(YES) from the production MOS temp-high quantiles, and
+    # bet whenever |P_MOS - yes_price_pre| >= edge threshold.
+    mos_results = simulate_mos_edge(df, edge_thresholds=(0.05, 0.10, 0.15, 0.20))
+
     report = {
         "generated_at": pd.Timestamp.utcnow().isoformat(),
         "n_markets_analysed": int(len(df)),
@@ -158,6 +393,23 @@ def main():
             "market_majority": {
                 "description": "always bet the side priced above 0.50 (market agrees with us)",
                 **market,
+            },
+            "mos_edge": {
+                "description": (
+                    "IN-SAMPLE. bet when |P_MOS - yes_price_pre| >= edge. "
+                    "P_MOS = Gaussian(µ=temp_high_p50, σ=(p90-p10)/2.5631)."
+                    " threshold-format, tracked-city markets only."
+                ),
+                "caveats": [
+                    "current v3.1 boosters were trained on data spanning "
+                    "the same date range as these markets — look-ahead bias",
+                    "MOS issue_time = 00 UTC of resolution day; market price "
+                    "is 24h pre-close — MOS sees ~12h fresher data than "
+                    "the price snapshot (second-order leakage)",
+                    "walk-forward re-training is Phase 2b",
+                ],
+                "per_edge_threshold": mos_results["per_edge"],
+                "parse_coverage": mos_results["coverage"],
             },
         },
     }

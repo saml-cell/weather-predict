@@ -1,5 +1,5 @@
 {
-  "generated_at": "2026-04-19T09:21:09.301894+00:00",
+  "generated_at": "2026-04-19T09:53:35.655957+00:00",
   "n_markets_analysed": 7033,
   "min_prob_for_bet": 0.05,
   "max_prob_for_bet": 0.95,
@@ -40,6 +40,68 @@
       "mean_pnl_per_bet": 0.000683899117732637,
       "wins": 5459,
       "losses": 1574
+    },
+    "mos_edge": {
+      "description": "IN-SAMPLE. bet when |P_MOS - yes_price_pre| >= edge. P_MOS = Gaussian(\u00b5=temp_high_p50, \u03c3=(p90-p10)/2.5631). threshold-format, tracked-city markets only.",
+      "caveats": [
+        "current v3.1 boosters were trained on data spanning the same date range as these markets \u2014 look-ahead bias",
+        "MOS issue_time = 00 UTC of resolution day; market price is 24h pre-close \u2014 MOS sees ~12h fresher data than the price snapshot (second-order leakage)",
+        "walk-forward re-training is Phase 2b"
+      ],
+      "per_edge_threshold": {
+        "0.05": {
+          "edge_threshold": 0.05,
+          "n_bets": 257,
+          "total_pnl": 94.03336518849022,
+          "mean_pnl_per_bet": 0.365888580499962,
+          "roi": 0.365888580499962,
+          "hit_rate": 0.642023346303502,
+          "wins": 165,
+          "losses": 92,
+          "bet_yes_share": 0.3540856031128405
+        },
+        "0.10": {
+          "edge_threshold": 0.1,
+          "n_bets": 171,
+          "total_pnl": 94.30988707437422,
+          "mean_pnl_per_bet": 0.5515198074524807,
+          "roi": 0.5515198074524807,
+          "hit_rate": 0.52046783625731,
+          "wins": 89,
+          "losses": 82,
+          "bet_yes_share": 0.4619883040935672
+        },
+        "0.15": {
+          "edge_threshold": 0.15,
+          "n_bets": 144,
+          "total_pnl": 93.73608695686681,
+          "mean_pnl_per_bet": 0.6509450483115751,
+          "roi": 0.6509450483115751,
+          "hit_rate": 0.4652777777777778,
+          "wins": 67,
+          "losses": 77,
+          "bet_yes_share": 0.4930555555555556
+        },
+        "0.20": {
+          "edge_threshold": 0.2,
+          "n_bets": 128,
+          "total_pnl": 94.59334622256787,
+          "mean_pnl_per_bet": 0.7390105173638115,
+          "roi": 0.7390105173638115,
+          "hit_rate": 0.4296875,
+          "wins": 55,
+          "losses": 73,
+          "bet_yes_share": 0.5234375
+        }
+      },
+      "parse_coverage": {
+        "paired_total": 7033,
+        "parsed_threshold_in_tracked": 588,
+        "unparsed": 6280,
+        "untracked": 165,
+        "scored": 318,
+        "skipped_no_forecast": 270
+      }
     }
   }
 }
