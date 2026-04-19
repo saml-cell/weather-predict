@@ -16,11 +16,14 @@ and runs multiple strategies:
      UTC of the resolution date, matching the MOS training convention).
      A Gaussian is fit through the three quantiles to compute
      P(YES) = P(temp <= threshold) or P(temp >= threshold); edge = P_MOS -
-     yes_price_pre. IN-SAMPLE caveat: the current v3.1 boosters were
-     trained on data spanning the same date range — this is a ceiling on
-     what MOS could theoretically extract, not a tradable expectation.
-     Walk-forward re-training is Phase 2b. Restricted to threshold-format
-     markets in the 57 tracked cities (~588 paired markets).
+     yes_price_pre. Genuinely out-of-sample: production v3.1 booster has
+     train_end=2023-12-31 (val=2024, test=2025), so the Jan 2025 – Mar
+     2026 markets were never in train/val. Remaining caveats: (1) MOS
+     sees the 00 UTC forecast of resolution day while market price is
+     captured 24h pre-close — ~12h MOS freshness advantage; (2) at high
+     edge thresholds, top 5 bets carry >70% of total PnL — signal may be
+     jackpot-driven. Restricted to threshold-format markets in the 57
+     tracked cities (~588 paired markets).
 
 Output: ~/Weather predict program/data/polymarket_historical_backtest.json
 
@@ -297,8 +300,51 @@ def simulate_mos_edge(df: pd.DataFrame,
             "bet_yes_share": float((betters["bet_side"] == "YES").mean()),
         }
 
+    # Temporal-stability test at edge >= 0.20. If the signal is real and
+    # distributed, ROI should be positive in every time window. If it's
+    # concentrated in one period, the 74% headline survives "out-of-sample"
+    # but fails "tradable".
+    PERIODS = [
+        ("2025-H1", "2025-01-01", "2025-07-01"),
+        ("2025-H2", "2025-07-01", "2026-01-01"),
+        ("2026-Q1", "2026-01-01", "2026-04-01"),
+    ]
+    per_period = {}
+    for name, start, end in PERIODS:
+        window = scored_df[(scored_df["resolution_date"] >= start) &
+                           (scored_df["resolution_date"] < end)].copy()
+        window_stats = {"start": start, "end": end, "n_candidates": int(len(window))}
+        window_bets = window[window["edge"].abs() >= 0.20].copy()
+        if window_bets.empty:
+            window_stats.update({"n_bets": 0})
+        else:
+            window_bets["bet_side"] = np.where(window_bets["edge"] > 0, "YES", "NO")
+
+            def pnl(row):
+                p = row["yes_price_pre"]
+                if row["bet_side"] == "YES":
+                    return (1.0 / p - 1.0) if row["outcome"] == 1 else -1.0
+                q = 1.0 - p
+                return (1.0 / q - 1.0) if row["outcome"] == 0 else -1.0
+
+            window_bets["pnl"] = window_bets.apply(pnl, axis=1)
+            wins = int((window_bets["pnl"] > 0).sum())
+            n = int(len(window_bets))
+            window_stats.update({
+                "n_bets": n,
+                "total_pnl": float(window_bets["pnl"].sum()),
+                "mean_pnl_per_bet": float(window_bets["pnl"].mean()),
+                "roi": float(window_bets["pnl"].sum() / n),
+                "hit_rate": float(wins / n),
+                "wins": wins,
+                "losses": n - wins,
+                "top5_pnl": float(window_bets.nlargest(min(5, n), "pnl")["pnl"].sum()),
+            })
+        per_period[name] = window_stats
+
     return {
         "per_edge": per_edge,
+        "per_period": per_period,
         "coverage": {
             "paired_total": int(len(df)),
             "parsed_threshold_in_tracked": kept,
@@ -396,19 +442,34 @@ def main():
             },
             "mos_edge": {
                 "description": (
-                    "IN-SAMPLE. bet when |P_MOS - yes_price_pre| >= edge. "
-                    "P_MOS = Gaussian(µ=temp_high_p50, σ=(p90-p10)/2.5631)."
-                    " threshold-format, tracked-city markets only."
+                    "OUT-OF-SAMPLE. bet when |P_MOS - yes_price_pre| >= edge. "
+                    "P_MOS = Gaussian(µ=temp_high_p50, σ=(p90-p10)/2.5631). "
+                    "threshold-format, tracked-city markets only."
+                ),
+                "out_of_sample_evidence": (
+                    "production v3.1 booster has train_end=2023-12-31, "
+                    "val_end=2024-12-31, test_end=2025-12-31. the 318 "
+                    "scored markets all resolved in Jan 2025 – Mar 2026, "
+                    "so none were in train or val. isotonic calibrators "
+                    "were fit on 2024 val; temp_c calibrator is pinned off "
+                    "per Council R4 Step 2, so temp predictions are raw "
+                    "booster output."
                 ),
                 "caveats": [
-                    "current v3.1 boosters were trained on data spanning "
-                    "the same date range as these markets — look-ahead bias",
-                    "MOS issue_time = 00 UTC of resolution day; market price "
-                    "is 24h pre-close — MOS sees ~12h fresher data than "
-                    "the price snapshot (second-order leakage)",
-                    "walk-forward re-training is Phase 2b",
+                    "MOS issue_time = 00 UTC of resolution day; market "
+                    "price is 24h pre-close — MOS sees ~12h fresher data "
+                    "than the price snapshot (small but nonzero leak)",
+                    "at |edge| >= 0.20, top 5 bets carry ~73% of total "
+                    "PnL — signal may be jackpot-driven rather than "
+                    "broadly distributed",
+                    "270 of 588 candidates skipped — all in cities added "
+                    "2026-04-18 or later (Atlanta/Dallas/Seattle/Miami/"
+                    "Buenos Aires/Hong Kong/Denver) without historical "
+                    "forecasts; scored set biased toward longer-tracked "
+                    "cities",
                 ],
                 "per_edge_threshold": mos_results["per_edge"],
+                "per_period_stability": mos_results["per_period"],
                 "parse_coverage": mos_results["coverage"],
             },
         },
