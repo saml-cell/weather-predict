@@ -1,0 +1,45 @@
+{
+  "generated_at": "2026-04-19T09:21:09.301894+00:00",
+  "n_markets_analysed": 7033,
+  "min_prob_for_bet": 0.05,
+  "max_prob_for_bet": 0.95,
+  "strategies": {
+    "perfect_foresight_ceiling": {
+      "description": "bet $1 on actual winner, every market",
+      "n_bets": 7033,
+      "total_pnl": 7290.102739730259,
+      "hit_rate": 1.0,
+      "mean_pnl_per_bet": 1.036556624446219,
+      "wins": 7033,
+      "losses": 0,
+      "roi": 1.036556624446219
+    },
+    "mispricing_only_ceiling": {
+      "description": "$1 on winner only when market priced winner \u2264 0.20",
+      "n_bets": 408,
+      "total_pnl": 3402.1513790547597,
+      "hit_rate": 1.0,
+      "mean_pnl_per_bet": 8.338606321212646,
+      "wins": 408,
+      "losses": 0
+    },
+    "naive_contrarian": {
+      "description": "always bet the side priced below 0.50",
+      "n_bets": 7033,
+      "total_pnl": 252.29287723524473,
+      "hit_rate": 0.2238020759277691,
+      "mean_pnl_per_bet": 0.035872725328486385,
+      "wins": 1574,
+      "losses": 5459
+    },
+    "market_majority": {
+      "description": "always bet the side priced above 0.50 (market agrees with us)",
+      "n_bets": 7033,
+      "total_pnl": 4.809862495013636,
+      "hit_rate": 0.7761979240722309,
+      "mean_pnl_per_bet": 0.000683899117732637,
+      "wins": 5459,
+      "losses": 1574
+    }
+  }
+}
