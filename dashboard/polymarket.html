@@ -30,6 +30,10 @@
     th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #2a2a45; font-size: 14px; }
     th { font-weight: 600; color: #d4a853; background: #1a1a2b; position: sticky; top: 0; }
     tr:hover td { background: #1a1a2b; }
+    .tab { padding: 8px 16px; cursor: pointer; border-bottom: 2px solid transparent; color: #8a8697; font-size: 13px; font-weight: 500; letter-spacing: 0.03em; }
+    .tab.active { color: #d4a853; border-bottom-color: #d4a853; }
+    .tab:hover:not(.active) { color: #e8e4df; }
+    .sweet-spot { background: rgba(124, 154, 110, 0.12); }
   </style>
 </head>
 <body class="min-h-screen">
@@ -51,6 +55,12 @@
     <!-- Summary cards -->
     <div id="summary" class="grid grid-cols-2 md:grid-cols-4 gap-3 mb-6"></div>
 
+    <!-- Tab bar -->
+    <div class="flex items-center gap-1 border-b border-base-border mb-4 mono">
+      <div class="tab active" data-tab="edges">TOP EDGES</div>
+      <div class="tab" data-tab="leadtime">LEAD-TIME SKILL</div>
+    </div>
+
     <!-- Per-city P&L (only shown once resolved bets exist) -->
     <section id="bycity-section" class="mb-6 hidden">
       <h2 class="text-sm font-semibold text-gold mb-2 mono">PER-CITY PAPER P&L</h2>
@@ -58,7 +68,7 @@
     </section>
 
     <!-- Tomorrow's top edges -->
-    <section class="mb-6">
+    <section class="mb-6 tab-panel" data-panel="edges">
       <h2 class="text-sm font-semibold text-gold mb-2 mono">
         TOP EDGES — <span id="target-date">—</span>
       </h2>
@@ -79,7 +89,7 @@
     </section>
 
     <!-- Cities scanned -->
-    <section class="mb-6">
+    <section class="mb-6 tab-panel" data-panel="edges">
       <h2 class="text-sm font-semibold text-gold mb-2 mono">CITY COVERAGE</h2>
       <div class="bg-base-card rounded-lg border border-base-border overflow-x-auto">
         <table>
@@ -92,6 +102,45 @@
             </tr>
           </thead>
           <tbody id="cities-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- Lead-time skill panel (hidden by default) -->
+    <section class="mb-6 tab-panel hidden" data-panel="leadtime">
+      <h2 class="text-sm font-semibold text-gold mb-2 mono">LEAD-TIME MAE — HIGHEST TEMP (°C)</h2>
+      <p class="text-muted text-xs mb-3">
+        Mean absolute error against observed high, rolling 30d. Polymarket daily-temp markets resolve
+        at <span class="text-sage">day+1</span> — the MOS sweet spot. Errors grow by 40-50% by day+2-3.
+        <span class="text-muted-dim">Day+1 cells highlighted.</span>
+      </p>
+      <div class="bg-base-card rounded-lg border border-base-border overflow-x-auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Source</th>
+              <th class="text-right">day+1</th>
+              <th class="text-right">day+2-3</th>
+              <th class="text-right">day+4-7</th>
+              <th class="text-right">n (d+1)</th>
+            </tr>
+          </thead>
+          <tbody id="leadtime-body"><tr><td colspan="5" class="text-muted text-center py-4">Loading…</td></tr></tbody>
+        </table>
+      </div>
+      <h2 class="text-sm font-semibold text-gold mb-2 mt-6 mono">LEAD-TIME MAE — OTHER METRICS</h2>
+      <div class="bg-base-card rounded-lg border border-base-border overflow-x-auto">
+        <table>
+          <thead>
+            <tr>
+              <th>Metric</th>
+              <th>Source</th>
+              <th class="text-right">day+1</th>
+              <th class="text-right">day+2-3</th>
+              <th class="text-right">day+4-7</th>
+            </tr>
+          </thead>
+          <tbody id="leadtime-other-body"><tr><td colspan="5" class="text-muted text-center py-4">Loading…</td></tr></tbody>
         </table>
       </div>
     </section>
@@ -195,6 +244,73 @@
           </table>`;
       }
     }
+    async function loadLeadtime() {
+      try {
+        const res = await fetch('/api/skill/leadtime');
+        if (!res.ok) { document.getElementById('leadtime-body').innerHTML = `<tr><td colspan="5" class="text-rose text-center py-4">Endpoint failed.</td></tr>`; return; }
+        const d = await res.json();
+        const rows = d.rows || [];
+        // Pivot: source × lead for temp_high, keep n at day+1
+        const tempRows = rows.filter(r => r.metric === 'temp_high');
+        const bySource = {};
+        for (const r of tempRows) {
+          bySource[r.source] = bySource[r.source] || { source: r.source };
+          bySource[r.source][r.lead] = r.mae;
+          if (r.lead === 'day+1') bySource[r.source].n = r.n;
+        }
+        const sortedSources = Object.values(bySource).sort((a, b) => (a['day+1'] ?? 99) - (b['day+1'] ?? 99));
+        document.getElementById('leadtime-body').innerHTML = sortedSources.length === 0
+          ? `<tr><td colspan="5" class="text-muted text-center py-4">No data.</td></tr>`
+          : sortedSources.map(s => `
+            <tr>
+              <td class="font-semibold">${s.source}</td>
+              <td class="mono text-right sweet-spot">${fmt(s['day+1'], 2)}°C</td>
+              <td class="mono text-right">${fmt(s['day+2-3'], 2)}°C</td>
+              <td class="mono text-right">${fmt(s['day+4-7'], 2)}°C</td>
+              <td class="mono text-right text-muted-dim">${s.n ?? '—'}</td>
+            </tr>`).join('');
+
+        // Other metrics: for each metric≠temp_high, show best-source row per lead
+        const otherMetrics = ['temp_low', 'precip_mm', 'wind'];
+        const otherLines = [];
+        for (const m of otherMetrics) {
+          const metricRows = rows.filter(r => r.metric === m);
+          if (metricRows.length === 0) continue;
+          // pick best source (lowest MAE) per lead
+          const leads = ['day+1', 'day+2-3', 'day+4-7'];
+          const bestPerLead = {};
+          for (const l of leads) {
+            const lr = metricRows.filter(r => r.lead === l).sort((a, b) => a.mae - b.mae)[0];
+            if (lr) bestPerLead[l] = lr;
+          }
+          const bestSrc = bestPerLead['day+1']?.source || '—';
+          otherLines.push(`<tr>
+            <td class="font-semibold">${m.replace('_', ' ')}</td>
+            <td class="text-muted-dim">${bestSrc} (best)</td>
+            <td class="mono text-right sweet-spot">${fmt(bestPerLead['day+1']?.mae, 2)}</td>
+            <td class="mono text-right">${fmt(bestPerLead['day+2-3']?.mae, 2)}</td>
+            <td class="mono text-right">${fmt(bestPerLead['day+4-7']?.mae, 2)}</td>
+          </tr>`);
+        }
+        document.getElementById('leadtime-other-body').innerHTML = otherLines.length === 0
+          ? `<tr><td colspan="5" class="text-muted text-center py-4">No data.</td></tr>`
+          : otherLines.join('');
+      } catch (e) {
+        document.getElementById('leadtime-body').innerHTML = `<tr><td colspan="5" class="text-rose text-center py-4">Load error: ${e.message}</td></tr>`;
+      }
+    }
+
+    document.querySelectorAll('.tab').forEach(tab => {
+      tab.addEventListener('click', () => {
+        const target = tab.dataset.tab;
+        document.querySelectorAll('.tab').forEach(t => t.classList.toggle('active', t === tab));
+        document.querySelectorAll('.tab-panel').forEach(p => {
+          p.classList.toggle('hidden', p.dataset.panel !== target);
+        });
+        if (target === 'leadtime') loadLeadtime();
+      });
+    });
+
     load();
     setInterval(load, 60000); // refresh every minute
   </script>

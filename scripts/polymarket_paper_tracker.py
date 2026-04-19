@@ -58,6 +58,12 @@ CITY_MAP = {
     "houston": "Houston",
     "moscow": "Moscow",
     "istanbul": "Istanbul",
+    "seattle": "Seattle",
+    "phoenix": "Phoenix",
+    "boston": "Boston",
+    "washington": "Washington",
+    "minneapolis": "Minneapolis",
+    "philadelphia": "Philadelphia",
 }
 
 
