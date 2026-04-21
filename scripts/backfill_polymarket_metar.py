@@ -58,6 +58,26 @@ KNOTS_TO_KMH = 1.852
 INCHES_TO_MM = 25.4
 
 
+def _hour_align(ts: str) -> str:
+    """Round IEM 'YYYY-MM-DD HH:MM' timestamp to the nearest hour and
+    format as ISO8601 with UTC offset — matches forecasts_hourly / obs.
+    Equivalent SQL: strftime('%Y-%m-%dT%H:00:00+00:00', datetime(ts, '+30 minutes')).
+    """
+    # ts like "2026-04-20 00:53" — space separator, no tz
+    date_part, time_part = ts.split(" ")
+    hh, mm = time_part.split(":")[:2]
+    h = int(hh)
+    if int(mm) >= 30:
+        h += 1
+    # roll over midnight if needed
+    if h == 24:
+        from datetime import datetime as _dt, timedelta as _td
+        d = _dt.strptime(date_part, "%Y-%m-%d") + _td(days=1)
+        date_part = d.strftime("%Y-%m-%d")
+        h = 0
+    return f"{date_part}T{h:02d}:00:00+00:00"
+
+
 def parse_rounding(rounding_str: str) -> str:
     s = (rounding_str or "").lower()
     if "fahrenheit" in s:
@@ -276,15 +296,34 @@ def main() -> int:
                 time.sleep(args.pace_sec)
                 continue
             cur = con.cursor()
+            # Rows are stored hour-aligned so the table joins cleanly with
+            # forecasts_hourly (which is on an exact hour grid). Multiple IEM
+            # reports in the same hour (e.g. :20 + :50, or SPECI) collapse
+            # via aggregation below: AVG for continuous vars, SUM for precip.
+            # This loses daily-max fidelity vs raw METAR — see cross-check
+            # comment — but matches what MOS training needs (point-in-hour
+            # observation, not peak).
             cur.executemany(
-                """INSERT OR IGNORE INTO observations_hourly_metar
+                """INSERT INTO observations_hourly_metar
                    (city_id, city_name, icao, provider, unit, valid_time,
                     temp_c, dew_point_c, humidity_pct, wind_speed_kmh,
                     wind_dir_deg, precip_mm, pressure_msl_hpa, fetched_at)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                   VALUES (?, ?, ?, ?, ?, ?,
+                           ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(icao, valid_time) DO UPDATE SET
+                     temp_c = COALESCE((temp_c + excluded.temp_c) / 2.0, excluded.temp_c, temp_c),
+                     dew_point_c = COALESCE((dew_point_c + excluded.dew_point_c) / 2.0, excluded.dew_point_c, dew_point_c),
+                     humidity_pct = COALESCE((humidity_pct + excluded.humidity_pct) / 2.0, excluded.humidity_pct, humidity_pct),
+                     wind_speed_kmh = COALESCE((wind_speed_kmh + excluded.wind_speed_kmh) / 2.0, excluded.wind_speed_kmh, wind_speed_kmh),
+                     wind_dir_deg = COALESCE((wind_dir_deg + excluded.wind_dir_deg) / 2.0, excluded.wind_dir_deg, wind_dir_deg),
+                     precip_mm = COALESCE(precip_mm, 0) + COALESCE(excluded.precip_mm, 0),
+                     pressure_msl_hpa = COALESCE((pressure_msl_hpa + excluded.pressure_msl_hpa) / 2.0, excluded.pressure_msl_hpa, pressure_msl_hpa),
+                     fetched_at = excluded.fetched_at
+                """,
                 [
                     (cid, city, icao, m["provider"], m["unit"],
-                     r["valid_time"], r["temp_c"], r["dew_point_c"],
+                     _hour_align(r["valid_time"]),
+                     r["temp_c"], r["dew_point_c"],
                      r["humidity_pct"], r["wind_speed_kmh"],
                      r["wind_dir_deg"], r["precip_mm"],
                      r["pressure_msl_hpa"], now)
