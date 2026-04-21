@@ -151,6 +151,48 @@ DEFAULT_MODELS_DIR = os.path.join(
     "data",
     "mos_models_station",
 )
+METAR_MODELS_DIR = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "data",
+    "mos_models_metar",
+)
+# Cities whose Polymarket markets (or app forecasts) resolve against airport
+# stations that IEM publishes. For these, the METAR-trained MOS (same feature
+# set, trained against observations_hourly_metar) gives tighter temp_c MAE
+# (0.752°C vs 0.807°C on 2025-H2 test set, 2026-04-21 eval). For other cities
+# we fall through to the Meteostat-trained MOS at DEFAULT_MODELS_DIR.
+# See: data/polymarket_resolution_sources.json for the ICAO mapping; the 15
+# ids below are (13 Polymarket cities + Bratislava + Bibinje). Hong Kong
+# (id=51) uses the Hong Kong Observatory (not ICAO) — stays on station MOS.
+METAR_CITY_IDS: set[int] = {
+    1,   # Bratislava → LZIB
+    2,   # New York → KLGA
+    3,   # London → EGLC
+    9,   # Bibinje → LDZD (Zadar)
+    12,  # Paris → LFPB (Le Bourget)
+    17,  # Madrid → LEMD
+    21,  # Chicago → KORD
+    28,  # Moscow → UUWW (Vnukovo)
+    44,  # Miami → KMIA
+    45,  # Austin → KAUS
+    46,  # Dallas → KDAL (Love Field)
+    47,  # Houston → KHOU (Hobby)
+    49,  # Denver → KBKF (Buckley ANGB)
+    52,  # Istanbul → LTFM
+    55,  # Seattle → KSEA
+}
+
+
+def resolve_models_dir(city_id: int | None) -> str:
+    """Per-city MOS dispatch. If the city has a METAR-trained MOS and those
+    artifacts exist, return that dir; otherwise fall through to station MOS.
+    Explicit callers (e.g. diagnose_pit_shape.py) can still pass DEFAULT_MODELS_DIR.
+    """
+    if city_id in METAR_CITY_IDS and models_available(METAR_MODELS_DIR):
+        return METAR_MODELS_DIR
+    return DEFAULT_MODELS_DIR
+
+
 CALIBRATORS_FILENAME = "isotonic_calibrators.pkl"
 HURDLE_SUBDIR = "precip_hurdle"
 OPEN_METEO_FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
@@ -186,9 +228,13 @@ _FEATURE_COLS_BY_SET = {
 }
 
 
-def _read_metadata(models_dir: str) -> dict:
+def _read_metadata(models_dir: str) -> dict[str, object]:
     """Read the first available per-variable metadata.json.
     Returns {} if none found; callers default sensibly.
+
+    The metadata is a free-form JSON object (feature_set, feature_cols,
+    trained_at, plus model-version-specific fields), so the value type is
+    `object` — callers narrow per key with .get(...).
     """
     for v in VARIABLES:
         meta_path = os.path.join(models_dir, v, "metadata.json")
@@ -196,12 +242,12 @@ def _read_metadata(models_dir: str) -> dict:
             try:
                 with open(meta_path) as f:
                     return json.load(f)
-            except Exception:
+            except (OSError, json.JSONDecodeError):
                 pass
     return {}
 
 
-def _assert_deployment_consistent(models_dir: str, meta: dict) -> None:
+def _assert_deployment_consistent(models_dir: str, meta: dict[str, object]) -> None:
     """Guard against the v3.1-class bug: metadata declares a feature_set that
     the inference-side FEATURE_COLS constant doesn't know about, or the set of
     columns in metadata diverges from the constant. Raises RuntimeError on
@@ -275,9 +321,13 @@ def feature_set_for(models_dir: str = DEFAULT_MODELS_DIR) -> str:
     return _booster_cache.get("_feature_set", FEATURE_SET_V1)
 
 
-def model_info(models_dir: str = DEFAULT_MODELS_DIR) -> dict:
+def model_info(models_dir: str = DEFAULT_MODELS_DIR) -> dict[str, object]:
     """Provenance about the currently-deployed MOS models, for /api/health
-    and /api/forecast. Side-effect: loads models (cached)."""
+    and /api/forecast. Side-effect: loads models (cached).
+
+    Keys: feature_set (str|None), model_version (str), trained_at
+    (str|None), booster_count (int), variables (list[str]).
+    """
     load_models(models_dir)
     loaded = _booster_cache.get("_models") or {}
     return {
@@ -289,8 +339,12 @@ def model_info(models_dir: str = DEFAULT_MODELS_DIR) -> dict:
     }
 
 
-def _load_cities_meta() -> dict:
-    """Cache cities table metadata keyed by id. Used for v2 climate-zone features."""
+def _load_cities_meta() -> dict[int, dict[str, object]]:
+    """Cache cities table metadata keyed by id. Used for v2 climate-zone features.
+
+    Inner dict columns: id (int), lat (float), lon (float), elevation_m
+    (float|None). `object` value type because callers index by string key.
+    """
     global _cities_meta_cache
     with _cities_meta_lock:
         if _cities_meta_cache:
@@ -429,7 +483,7 @@ def _marginal_precip_quantiles(
     q10_amt: np.ndarray,
     q50_amt: np.ndarray,
     q90_amt: np.ndarray,
-) -> dict:
+) -> dict[float, np.ndarray]:
     """Reconstruct the hurdle model's marginal precip quantiles per row.
 
     Mirrors `train_mos_hurdle.marginal_quantiles` — kept inline here to avoid
@@ -501,7 +555,12 @@ def load_calibrators(models_dir: str = DEFAULT_MODELS_DIR) -> dict:
         return cals
 
 
-def _apply_calibrator(calibrator, q10: np.ndarray, q50: np.ndarray, q90: np.ndarray) -> tuple:
+def _apply_calibrator(
+    calibrator,
+    q10: np.ndarray,
+    q50: np.ndarray,
+    q90: np.ndarray,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Given a fitted empirical-CDF calibrator for one variable and three
     rearranged quantile predictions (numpy arrays), return the calibrated
     (q10, q50, q90) tuple.
@@ -837,7 +896,7 @@ def _clip_physics(variable: str, arr: np.ndarray) -> np.ndarray:
     return arr
 
 
-def _rearrange_quantiles(pred_by_q: dict) -> dict:
+def _rearrange_quantiles(pred_by_q: dict[float, np.ndarray]) -> dict[float, np.ndarray]:
     """Cross-quantile rearrangement: sort per-row so q10 ≤ q50 ≤ q90."""
     taus = sorted(pred_by_q.keys())
     stacked = np.column_stack([pred_by_q[t] for t in taus])
@@ -848,12 +907,17 @@ def _rearrange_quantiles(pred_by_q: dict) -> dict:
 def predict_hourly(
     long_df: pd.DataFrame,
     city_id: int,
-    models_dir: str = DEFAULT_MODELS_DIR,
+    models_dir: str | None = None,
 ) -> pd.DataFrame:
     """Run all trained quantile models for all variables on the given
     long-format forecast data. Returns a wide frame indexed by valid_time
     with columns like temp_c_p10/p50/p90, humidity_pct_p10/p50/p90, etc.
+
+    If models_dir is None, per-city dispatch picks METAR MOS for cities in
+    METAR_CITY_IDS and station MOS otherwise. Pass an explicit path to override.
     """
+    if models_dir is None:
+        models_dir = resolve_models_dir(city_id)
     models = load_models(models_dir)
     if not models:
         logger.error("No MOS models loaded from %s", models_dir)
@@ -932,7 +996,7 @@ def predict_hourly(
 # Daily aggregation
 # ---------------------------------------------------------------------------
 
-def aggregate_to_daily(hourly_preds: pd.DataFrame) -> dict:
+def aggregate_to_daily(hourly_preds: pd.DataFrame) -> dict[str, dict[str, float | int | None]]:
     """Fold hourly quantile predictions into per-date summaries.
 
     Returns: { 'YYYY-MM-DD': {
@@ -943,6 +1007,7 @@ def aggregate_to_daily(hourly_preds: pd.DataFrame) -> dict:
         'humidity_mean_p10/p50/p90': float,
         'n_hours': int,
     }}
+    The numeric fields can be None when `_to_num` rounds NaN.
     """
     if hourly_preds.empty:
         return {}
@@ -988,7 +1053,7 @@ def _to_num(v):
 # ---------------------------------------------------------------------------
 
 def predict_for_city(
-    city: dict, forecast_days: int = 7, models_dir: str = DEFAULT_MODELS_DIR
+    city: dict, forecast_days: int = 7, models_dir: str | None = None
 ) -> dict:
     """End-to-end MOS prediction for one city.
 
@@ -1001,6 +1066,8 @@ def predict_for_city(
     }
     """
     t0 = datetime.now(timezone.utc)
+    if models_dir is None:
+        models_dir = resolve_models_dir(city.get("id"))
     if not models_available(models_dir):
         logger.warning("MOS models not found at %s; skipping inference", models_dir)
         return {

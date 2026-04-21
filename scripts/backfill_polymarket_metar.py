@@ -41,6 +41,17 @@ SKIP_CITIES = {"Hong Kong"}  # HKO, not ICAO — handle separately if needed.
 
 MANUAL_ICAO = {
     "New York": {"icao": "KLGA", "provider": "Wunderground", "unit": "F"},
+    # App-only cities (not in Polymarket but worth METAR coverage for /api/forecast/).
+    # Probed 2026-04-22, IEM has full hourly coverage:
+    "Bratislava": {"icao": "LZIB", "provider": "METAR",
+                   "unit": "C"},   # M.R. Štefánik, 9 km from downtown
+    "Bibinje":    {"icao": "LDZD", "provider": "METAR",
+                   "unit": "C"},   # Zadar Airport, 6 km from Bibinje
+    # Deliberately NOT added:
+    #  - Kremnické Bane → LZSL (Sliač): zero IEM coverage
+    #  - Štrbské Pleso  → LZTT (Poprad-Tatry): ~600m elevation mismatch
+    #    (valley vs High Tatras lake); existing WMO 11933 is on-site at 1.5km
+    #    and correct elevation — METAR would degrade forecasts for this city.
 }
 
 UA = "weather-predict-metar-backfill/1.0 (+https://github.com/saml-cell)"
