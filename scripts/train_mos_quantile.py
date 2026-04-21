@@ -150,6 +150,7 @@ def _project_dir() -> str:
 
 OBS_TABLE_ERA5 = "observations_hourly"
 OBS_TABLE_STATION = "observations_hourly_station"
+OBS_TABLE_METAR = "observations_hourly_metar"
 
 # Feature set flags. Toggled per trainer run via --feature-set.
 FEATURE_SET_V1 = "v1"  # original baseline
@@ -200,6 +201,7 @@ def load_joined(
     obs_table = {
         "era5": OBS_TABLE_ERA5,
         "station": OBS_TABLE_STATION,
+        "metar": OBS_TABLE_METAR,
     }[target_source]
 
     fc_sql = f"""
@@ -341,7 +343,10 @@ def attach_obs_lag_features(
     """
     if df.empty:
         return df
-    obs_table = OBS_TABLE_STATION if target_source == "station" else OBS_TABLE_ERA5
+    obs_table = {
+        "station": OBS_TABLE_STATION,
+        "metar": OBS_TABLE_METAR,
+    }.get(target_source, OBS_TABLE_ERA5)
     cols_sql = ", ".join(lag_vars)
     obs_all = pd.read_sql_query(
         f"SELECT city_id, valid_time, {cols_sql} FROM {obs_table}",
@@ -1165,10 +1170,13 @@ def parse_args():
     )
     p.add_argument(
         "--target-source",
-        choices=["era5", "station"],
+        choices=["era5", "station", "metar"],
         default="era5",
         help="Which observation table to use as training target (default: era5). "
-             "'station' uses the Meteostat-backfilled observations_hourly_station table.",
+             "'station' uses the Meteostat-backfilled observations_hourly_station table. "
+             "'metar' uses observations_hourly_metar (Iowa Mesonet ASOS for the 13 "
+             "Polymarket-covered ICAOs only — smaller training set, but aligned to "
+             "the resolution source Polymarket weather markets actually use).",
     )
     p.add_argument(
         "--feature-set",
@@ -1209,6 +1217,8 @@ def main():
 
     if args.target_source == "era5":
         default_dir = MODELS_DIR_NAME
+    elif args.target_source == "metar":
+        default_dir = f"{MODELS_DIR_NAME}_metar"
     else:
         default_dir = f"{MODELS_DIR_NAME}_station"
     output_dir = args.output_dir or os.path.join(_project_dir(), "data", default_dir)

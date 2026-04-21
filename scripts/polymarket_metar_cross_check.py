@@ -31,7 +31,7 @@ OUT_PATH = ROOT / "data" / "polymarket_metar_delta.json"
 
 def daily_max_c(con: sqlite3.Connection, city: str, date: str) -> float | None:
     row = con.execute(
-        """SELECT MAX(tmpc) FROM observations_hourly_metar
+        """SELECT MAX(temp_c) FROM observations_hourly_metar
            WHERE city_name=? AND DATE(valid_time)=?""",
         (city, date),
     ).fetchone()
