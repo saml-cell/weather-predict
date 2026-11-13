@@ -108,6 +108,34 @@ It has three comparisons, all computed by that script:
 
 A wet day is at least 1 mm. Hit rate is the fraction of correct wet/dry calls. wttr.in and the keyed commercial APIs stay in the live blend and out of this file: they have no keyless forecast archive.
 
+## Long-range outlook and forecast drift
+
+The default branch of this repo is `master`.
+
+`GET /api/v1/outlook?date=YYYY-MM-DD&lat=48.15&lon=17.11` returns probabilities for one date up to 180 days ahead: chance the high is below 0°C or at least 10°C, terciles against the day-of-year climate, chance of at least 1 mm of rain, and a 10th–90th percentile range. Days 1–14 use the ECMWF IFS ensemble on Open-Meteo. That feed has no member values after about 14 days (`forecast_days=46` is HTTP 400). Days 15–180 use ECMWF SEAS5 from Open-Meteo’s seasonal API, which does not need a Copernicus key. `CDS_API_KEY` is optional and unused while that endpoint works. If the seasonal request fails, the answer is climatology.
+
+Climatology is the 2016–2025 Open-Meteo archive at 48.15, 17.11, pooled ±7 days of the year. How far the stated probability moves off that normal depends on the committed backtest in `reports/outlook_backtest.json`. Skill that was not backtested, including every lead past 14 days, stays on the climatology and the payload says so.
+
+`GET /api/v1/forecast-drift?date=YYYY-MM-DD&lat=48.15&lon=17.11` applies `reports/forecast_drift.json`: the expected change in the daily-high forecast over seven days, an uncertainty band, the probability the later forecast stays within 1.5°C, and the probability the rain yes/no call flips. Those two probabilities are the held-out rates from that file, with their Brier scores.
+
+Climate indices are tested in `reports/climate_drivers.json`. A feature is kept only when a one-predictor regression beats predicting a zero anomaly by at least 0.05°C MAE on the last 30% of validated SHMU days at Bratislava-letisko (`11816`). The outlook probabilities are not further shifted by the survivors; the gain is reported there instead of being folded into a 70% claim.
+
+The homepage date control calls these endpoints. Regenerate with `python3 scripts/backtest_outlook.py`.
+
+Figures below are copied from the JSON files produced by that command for 48.15, 17.11. Held-out lead tests use 24 days. Previous runs start in mid-August 2026, so those days are almost all Open-Meteo archive observations. Climate-driver tests use 608 validated days at Bratislava-letisko.
+
+| Lead | Daily-high MAE | CRPS skill vs day-of-year climate | Rain Brier skill |
+| --- | --- | --- | --- |
+| 1 day | 0.658°C | 0.762 | 0.355 |
+| 3 days | 0.892°C | 0.676 | 0.569 |
+| 7 days | 1.504°C | 0.397 | 0.028 |
+
+Rain skill at 7 days is near climatology (Brier skill 0.028). Leads 15–180 were not scored: the seasonal API returned the past dates with every SEAS5 member null, and `forecast_days=46` on the ensemble API is HTTP 400. Those dates stay on climatology.
+
+Only QBO beat a zero-anomaly forecast by the 0.05°C rule: +0.101°C MAE at 14 days (test n=114) and +0.054°C at 42 days (test n=123). NAO, AO and Niño3.4 did not. AMO had too few overlapping months. MJO (CPC file 404), 10 hPa 60°N wind, Mediterranean SST and soil moisture were unavailable without a CDS download.
+
+Over 80 days, the day-7 forecast of the daily high was on average 0.996°C warmer than the run seven days later (MAE 1.964°C, standard deviation 2.341°C). The rain yes/no call flipped on 23.7% of days. The chance a revision stays within 1.5°C, estimated on the first 70% of days, was 0.464; on the last 24 days the observed rate was 0.583 and the Brier score was 0.257. The rain-flip probability used the same way was 0.250 with Brier score 0.167. Mean absolute revision fell from 2.053°C at lead 7 to 1.014°C at lead 3 and 0.601°C at lead 1. When |lead-7 forecast minus the later observation| was in the upper half, the mean absolute revision was 3.145°C, against 0.782°C in the lower half. The previous-runs archive used here has no ensemble-member spread.
+
 ## Deploy
 
 Docker:

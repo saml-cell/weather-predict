@@ -1,0 +1,45 @@
+{
+  "definition": "Revision is the latest archived run minus the run from 7 days earlier (Open-Meteo previous_day7 versus the latest previous-runs temperature_2m), for daily maximum temperature at 48.15, 17.11. Observations for the spread test are the Open-Meteo archive.",
+  "n": 80,
+  "revision_c": {
+    "n": 80,
+    "mean_c": -0.996,
+    "mae_c": 1.964,
+    "std_c": 2.341
+  },
+  "bias_direction": "colder",
+  "rain_flip_rate": 0.237,
+  "within_1_5c_rate": 0.5,
+  "held_out": {
+    "n": 24,
+    "probability_within_1_5c": 0.464,
+    "brier_within_1_5c": 0.257,
+    "reliability_within_1_5c": [
+      {
+        "bin_low": 0.0,
+        "bin_high": 1.0,
+        "n": 24,
+        "mean_probability": 0.464,
+        "observed_frequency": 0.583
+      }
+    ],
+    "probability_rain_flips": 0.25,
+    "brier_rain_flips": 0.167
+  },
+  "spread_proxy": {
+    "note": "Previous-runs responses used here do not include ensemble member spread. The proxy is |lead-7 forecast minus the later observation|.",
+    "mean_abs_revision_when_proxy_low_c": 0.782,
+    "mean_abs_revision_when_proxy_high_c": 3.145,
+    "n_each": 40
+  },
+  "convergence": {
+    "lead_7_mae_vs_latest_c": 2.053,
+    "lead_3_mae_vs_latest_c": 1.014,
+    "lead_1_mae_vs_latest_c": 0.601
+  },
+  "generated_at": "2026-11-13T10:14:16.749649+00:00",
+  "location": {
+    "latitude": 48.15,
+    "longitude": 17.11
+  }
+}

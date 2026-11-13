@@ -57,6 +57,7 @@ from init_db import create_schema
 from fetch_weather import geocode
 from weighted_forecast import produce_forecast
 import forecast_service
+import outlook as outlook_mod
 from seasonal_forecast import produce_seasonal_forecast, format_json_output
 from climate_indices import get_current_index_state, build_climatology
 from alerts import check_city_alerts
@@ -898,6 +899,101 @@ def geocode_v1():
         logger.exception("Geocode failed")
         return jsonify({"error": "Geocoding failed"}), 502
     return jsonify({"results": results})
+
+
+def _outlook_coords():
+    try:
+        lat = float(request.args.get("lat", 48.15))
+        lon = float(request.args.get("lon", 17.11))
+    except (TypeError, ValueError):
+        return None, None, (jsonify({"error": "lat and lon must be numbers"}), 400)
+    if not -90 <= lat <= 90 or not -180 <= lon <= 180:
+        return None, None, (jsonify({"error": "lat or lon is out of range"}), 400)
+    return lat, lon, None
+
+
+@app.route("/api/v1/outlook", methods=["GET"])
+def outlook_v1():
+    """Probabilistic outlook for one date, out to 180 days."""
+    if not _check_rate_limit(request.remote_addr or "unknown", "api_read"):
+        return jsonify({"error": "Rate limit exceeded"}), 429
+    raw_date = (request.args.get("date") or "").strip()
+    try:
+        target = date.fromisoformat(raw_date)
+    except ValueError:
+        return jsonify({"error": "date is required as YYYY-MM-DD"}), 400
+    lat, lon, error = _outlook_coords()
+    if error:
+        return error
+    lead = (target - date.today()).days
+    if lead < 0 or lead > 180:
+        return jsonify({"error": "date must be from today through 180 days ahead"}), 400
+    report = outlook_mod.load_json_report("outlook_backtest.json") or {}
+    clim = (report.get("climatology") or {}).get(str(target.timetuple().tm_yday))
+    if not clim:
+        return jsonify({"error": "Climatology backtest has not been committed yet."}), 503
+    try:
+        tmax, precip, source = outlook_mod.fetch_member_values(lat, lon, target, lead)
+    except Exception:
+        logger.exception("Outlook fetch failed")
+        tmax, precip, source = [], [], outlook_mod.source_for_lead(lead)
+    skill_row = outlook_mod.bucket_skill(report, lead) or {}
+    calibration = {"rain": skill_row.get("rain_calibration")} if isinstance(skill_row, dict) else None
+    body = outlook_mod.compose_outlook(target, clim, tmax, precip, source, skill_row, calibration)
+    body.update({
+        "date": target.isoformat(),
+        "lead_days": lead,
+        "location": {"latitude": lat, "longitude": lon},
+        "climatology": clim,
+        "cds_api_key_configured": bool(os.environ.get("CDS_API_KEY")),
+    })
+    return jsonify(body)
+
+
+@app.route("/api/v1/outlook/skill", methods=["GET"])
+def outlook_skill_v1():
+    report = outlook_mod.load_json_report("outlook_backtest.json")
+    if not report:
+        return jsonify({"error": "No outlook backtest yet."}), 404
+    public = {key: value for key, value in report.items() if key != "climatology"}
+    return jsonify(public)
+
+
+@app.route("/api/v1/forecast-drift", methods=["GET"])
+def forecast_drift_v1():
+    """How today's forecast for a date is expected to move over the next 7 days."""
+    if not _check_rate_limit(request.remote_addr or "unknown", "api_read"):
+        return jsonify({"error": "Rate limit exceeded"}), 429
+    raw_date = (request.args.get("date") or "").strip()
+    try:
+        target = date.fromisoformat(raw_date)
+    except ValueError:
+        return jsonify({"error": "date is required as YYYY-MM-DD"}), 400
+    lat, lon, error = _outlook_coords()
+    if error:
+        return error
+    lead = (target - date.today()).days
+    if lead < 0 or lead > 180:
+        return jsonify({"error": "date must be from today through 180 days ahead"}), 400
+    drift_report = outlook_mod.load_json_report("forecast_drift.json") or {}
+    try:
+        tmax, precip, source = outlook_mod.fetch_member_values(lat, lon, target, max(lead, 1))
+    except Exception:
+        logger.exception("Drift forecast fetch failed")
+        tmax, precip, source = [], [], None
+    dist = outlook_mod.member_distribution(tmax)
+    today_tmax = None if dist is None else dist["mean"]
+    rain = None
+    if precip:
+        rain = sum(1 for value in precip if value >= 1.0) / len(precip)
+    body = outlook_mod.compose_drift(today_tmax, rain, drift_report, horizon_days=7)
+    body.update({
+        "date": target.isoformat(),
+        "lead_days": lead,
+        "location": {"latitude": lat, "longitude": lon},
+        "forecast_source": source,
+    })
+    return jsonify(body)
 
 
 @app.route("/api/v1/forecast", methods=["GET"])

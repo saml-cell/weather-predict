@@ -1,0 +1,230 @@
+{
+  "features": {
+    "nao": {
+      "lead_14d": {
+        "kept": false,
+        "n_train": 413,
+        "n_test": 178,
+        "mae_model_c": 3.802,
+        "mae_climatology_c": 3.72,
+        "improvement_c": -0.082,
+        "slope": 0.1538,
+        "reason": "no_meaningful_improvement"
+      },
+      "lead_28d": {
+        "kept": false,
+        "n_train": 423,
+        "n_test": 182,
+        "mae_model_c": 3.64,
+        "mae_climatology_c": 3.582,
+        "improvement_c": -0.058,
+        "slope": 0.0975,
+        "reason": "no_meaningful_improvement"
+      },
+      "lead_42d": {
+        "kept": false,
+        "n_train": 425,
+        "n_test": 183,
+        "mae_model_c": 3.612,
+        "mae_climatology_c": 3.541,
+        "improvement_c": -0.072,
+        "slope": -0.1873,
+        "reason": "no_meaningful_improvement"
+      },
+      "lead_90d": {
+        "kept": false,
+        "n_train": 425,
+        "n_test": 183,
+        "mae_model_c": 3.634,
+        "mae_climatology_c": 3.541,
+        "improvement_c": -0.093,
+        "slope": -0.478,
+        "reason": "no_meaningful_improvement"
+      }
+    },
+    "ao": {
+      "lead_14d": {
+        "kept": false,
+        "n_train": 425,
+        "n_test": 183,
+        "mae_model_c": 3.576,
+        "mae_climatology_c": 3.541,
+        "improvement_c": -0.036,
+        "slope": -0.2248,
+        "reason": "no_meaningful_improvement"
+      },
+      "lead_28d": {
+        "kept": false,
+        "n_train": 425,
+        "n_test": 183,
+        "mae_model_c": 3.57,
+        "mae_climatology_c": 3.541,
+        "improvement_c": -0.029,
+        "slope": -0.5415,
+        "reason": "no_meaningful_improvement"
+      },
+      "lead_42d": {
+        "kept": false,
+        "n_train": 425,
+        "n_test": 183,
+        "mae_model_c": 3.643,
+        "mae_climatology_c": 3.541,
+        "improvement_c": -0.103,
+        "slope": -0.3132,
+        "reason": "no_meaningful_improvement"
+      },
+      "lead_90d": {
+        "kept": false,
+        "n_train": 425,
+        "n_test": 183,
+        "mae_model_c": 3.595,
+        "mae_climatology_c": 3.541,
+        "improvement_c": -0.054,
+        "slope": 0.178,
+        "reason": "no_meaningful_improvement"
+      }
+    },
+    "nino34": {
+      "lead_14d": {
+        "kept": false,
+        "n_train": 425,
+        "n_test": 183,
+        "mae_model_c": 4.256,
+        "mae_climatology_c": 3.541,
+        "improvement_c": -0.715,
+        "slope": -1.2804,
+        "reason": "no_meaningful_improvement"
+      },
+      "lead_28d": {
+        "kept": false,
+        "n_train": 425,
+        "n_test": 183,
+        "mae_model_c": 4.347,
+        "mae_climatology_c": 3.541,
+        "improvement_c": -0.806,
+        "slope": -1.5559,
+        "reason": "no_meaningful_improvement"
+      },
+      "lead_42d": {
+        "kept": false,
+        "n_train": 425,
+        "n_test": 183,
+        "mae_model_c": 3.641,
+        "mae_climatology_c": 3.541,
+        "improvement_c": -0.1,
+        "slope": -0.1674,
+        "reason": "no_meaningful_improvement"
+      },
+      "lead_90d": {
+        "kept": false,
+        "n_train": 425,
+        "n_test": 183,
+        "mae_model_c": 3.614,
+        "mae_climatology_c": 3.541,
+        "improvement_c": -0.073,
+        "slope": -0.114,
+        "reason": "no_meaningful_improvement"
+      }
+    },
+    "qbo": {
+      "lead_14d": {
+        "kept": true,
+        "n_train": 265,
+        "n_test": 114,
+        "mae_model_c": 2.757,
+        "mae_climatology_c": 2.857,
+        "improvement_c": 0.101,
+        "slope": 0.3062,
+        "reason": "improves_test_mae"
+      },
+      "lead_28d": {
+        "kept": false,
+        "n_train": 275,
+        "n_test": 118,
+        "mae_model_c": 2.62,
+        "mae_climatology_c": 2.622,
+        "improvement_c": 0.002,
+        "slope": 0.6131,
+        "reason": "no_meaningful_improvement"
+      },
+      "lead_42d": {
+        "kept": true,
+        "n_train": 284,
+        "n_test": 123,
+        "mae_model_c": 2.61,
+        "mae_climatology_c": 2.664,
+        "improvement_c": 0.054,
+        "slope": 0.5098,
+        "reason": "improves_test_mae"
+      },
+      "lead_90d": {
+        "kept": false,
+        "n_train": 318,
+        "n_test": 137,
+        "mae_model_c": 2.874,
+        "mae_climatology_c": 2.881,
+        "improvement_c": 0.007,
+        "slope": -0.0106,
+        "reason": "no_meaningful_improvement"
+      }
+    },
+    "amo": {
+      "lead_14d": {
+        "kept": false,
+        "reason": "too_few_samples",
+        "n": 0
+      },
+      "lead_28d": {
+        "kept": false,
+        "reason": "too_few_samples",
+        "n": 0
+      },
+      "lead_42d": {
+        "kept": false,
+        "reason": "too_few_samples",
+        "n": 0
+      },
+      "lead_90d": {
+        "kept": false,
+        "reason": "too_few_samples",
+        "n": 0
+      }
+    }
+  },
+  "kept": [
+    {
+      "feature": "qbo",
+      "lead": "lead_14d",
+      "kept": true,
+      "n_train": 265,
+      "n_test": 114,
+      "mae_model_c": 2.757,
+      "mae_climatology_c": 2.857,
+      "improvement_c": 0.101,
+      "slope": 0.3062,
+      "reason": "improves_test_mae"
+    },
+    {
+      "feature": "qbo",
+      "lead": "lead_42d",
+      "kept": true,
+      "n_train": 284,
+      "n_test": 123,
+      "mae_model_c": 2.61,
+      "mae_climatology_c": 2.664,
+      "improvement_c": 0.054,
+      "slope": 0.5098,
+      "reason": "improves_test_mae"
+    }
+  ],
+  "unavailable": [
+    "mediterranean_sst",
+    "mjo_amplitude",
+    "polar_vortex_u10_60n",
+    "soil_moisture"
+  ],
+  "station": 11816,
+  "n_days": 608,
+  "generated_at": "2026-11-13T10:14:16.749381+00:00",
+  "rule": "A feature is kept only when a one-predictor regression beats predicting zero anomaly by at least 0.05\u00b0C MAE on the last 30% of SHMU validated days."
+}
