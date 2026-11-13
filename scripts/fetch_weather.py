@@ -97,8 +97,9 @@ def geocode(city):
 # ---------------------------------------------------------------------------
 # Source 1: Open-Meteo
 # ---------------------------------------------------------------------------
-def fetch_open_meteo(lat, lon, tz="auto"):
+def fetch_open_meteo(lat, lon, tz="auto", forecast_days=7):
     """Fetch from Open-Meteo (free, no key)."""
+    forecast_days = max(1, min(int(forecast_days), 16))
     url = (
         f"https://api.open-meteo.com/v1/forecast?"
         f"latitude={lat}&longitude={lon}"
@@ -111,7 +112,7 @@ def fetch_open_meteo(lat, lon, tz="auto"):
         f"&hourly=temperature_2m,relative_humidity_2m,precipitation,"
         f"precipitation_probability,wind_speed_10m,wind_direction_10m,weathercode,uv_index,"
         f"apparent_temperature,cloud_cover"
-        f"&timezone={tz}&forecast_days=7"
+        f"&timezone={tz}&forecast_days={forecast_days}"
     )
     raw = fetch_json(url)
     if not raw or "current" not in raw:
@@ -685,12 +686,13 @@ def _compute_ensemble_stats(member_values):
     }
 
 
-def fetch_ecmwf(lat, lon):
+def fetch_ecmwf(lat, lon, forecast_days=7):
     """Fetch ECMWF IFS forecast via Open-Meteo ECMWF endpoint (free, no key).
 
     Also attempts the ensemble endpoint to get individual member data for
     spread/confidence statistics.
     """
+    forecast_days = max(1, min(int(forecast_days), 10))
     # --- Deterministic ECMWF IFS forecast ---
     url = (
         f"https://api.open-meteo.com/v1/ecmwf?"
@@ -700,7 +702,7 @@ def fetch_ecmwf(lat, lon):
         f"&daily=temperature_2m_max,temperature_2m_min,precipitation_sum,"
         f"wind_speed_10m_max,wind_direction_10m_dominant,weather_code"
         f"&hourly=temperature_2m,precipitation,wind_speed_10m,weather_code"
-        f"&timezone=auto&forecast_days=7"
+        f"&timezone=auto&forecast_days={forecast_days}"
     )
     raw = fetch_json(url, timeout=15)
     if not raw:
@@ -759,8 +761,25 @@ def fetch_ecmwf(lat, lon):
         }
         result["daily"].append(day_entry)
 
+    result["hourly"] = []
+    hourly_times = hourly.get("time", [])
+    h_temps = hourly.get("temperature_2m", [])
+    h_precips = hourly.get("precipitation", [])
+    h_winds = hourly.get("wind_speed_10m", [])
+    h_codes = hourly.get("weather_code", [])
+    for i, htime in enumerate(hourly_times):
+        wcode = h_codes[i] if i < len(h_codes) else None
+        result["hourly"].append({
+            "hour": htime,
+            "temp_c": h_temps[i] if i < len(h_temps) else None,
+            "precip_mm": h_precips[i] if i < len(h_precips) else None,
+            "precip_prob": None,
+            "wind_kmh": h_winds[i] if i < len(h_winds) else None,
+            "condition": WMO_CODES.get(wcode, "Unknown") if wcode is not None else None,
+        })
+
     # --- Ensemble endpoint (51 members) ---
-    ensemble_stats = _fetch_ecmwf_ensemble(lat, lon, dates)
+    ensemble_stats = _fetch_ecmwf_ensemble(lat, lon, dates, forecast_days=forecast_days)
     if ensemble_stats:
         result["ensemble"] = ensemble_stats
         # Enrich daily entries with ensemble spread info
@@ -777,7 +796,7 @@ def fetch_ecmwf(lat, lon):
     return validate_weather_data(result)
 
 
-def _fetch_ecmwf_ensemble(lat, lon, dates):
+def _fetch_ecmwf_ensemble(lat, lon, dates, forecast_days=7):
     """Fetch ECMWF ensemble data (51 members) and compute per-day statistics.
 
     Returns dict of {date: {temp_mean, temp_std, precip_mean, precip_std, ...}}.
@@ -788,7 +807,7 @@ def _fetch_ecmwf_ensemble(lat, lon, dates):
         f"latitude={lat}&longitude={lon}"
         f"&hourly=temperature_2m,precipitation"
         f"&models=ecmwf_ifs025"
-        f"&timezone=auto&forecast_days=7"
+        f"&timezone=auto&forecast_days={max(1, min(int(forecast_days), 10))}"
     )
     raw = fetch_json(url, timeout=20)
     if not raw or "hourly" not in raw:

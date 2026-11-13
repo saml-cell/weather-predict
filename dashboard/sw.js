@@ -1,7 +1,7 @@
 // Service Worker for Weather Predict Dashboard
 // Provides offline caching for the app shell and API responses
 
-const CACHE_NAME = 'weather-predict-v2';
+const CACHE_NAME = 'weather-predict-v3';
 const SHELL_ASSETS = [
   '/',
   '/index.html',

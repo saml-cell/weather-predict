@@ -1,11 +1,11 @@
 {
-  "name": "Weather Predict Dashboard",
+  "name": "Weather Predict",
   "short_name": "Weather",
-  "description": "Multi-source weather prediction with ML models and physics corrections",
+  "description": "Ensemble weather forecast with per-source comparison",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#0f172a",
-  "theme_color": "#0f172a",
+  "background_color": "#071018",
+  "theme_color": "#071018",
   "orientation": "any",
   "icons": [
     {

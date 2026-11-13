@@ -89,13 +89,15 @@
     "Warsaw",
     "Yakutsk"
   ],
-  "tier_1_sources": [
+    "tier_1_sources": [
     "Open-Meteo",
     "wttr.in",
     "OpenWeatherMap",
     "WeatherAPI",
     "VisualCrossing",
-    "ECMWF"
+    "ECMWF",
+    "SHMU",
+    "SHMU-OBS"
   ],
   "_dropped_sources_2026-04-19": [
     "NOAA_NWS — 27.5% NULL rate on temp_high_c + US-only; dropped 2026-04-19 per audit"

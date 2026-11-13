@@ -20,6 +20,7 @@ import sys
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db
@@ -30,6 +31,7 @@ from fetch_weather import (
     c_to_f
 )
 from meteo import apply_physics_corrections, dew_point, dew_point_depression, feels_like
+from shmu import fetch_shmu, fetch_shmu_observation
 
 # MOS inference — optional; failure here must not break the rest of the forecast
 try:
@@ -128,23 +130,31 @@ def _allowed_sources_for(city_name):
     return set(cfg.get("tier_2_sources", ["Open-Meteo", "wttr.in", "WeatherAPI"]))
 
 
-def fetch_all_sources(city):
-    """Fetch from all available sources in parallel, filtered by tier."""
+def fetch_all_sources(city, forecast_days=7, respect_tiers=True):
+    """Fetch from all available sources in parallel, filtered by tier.
+
+    A source that returns ``{"unavailable": "..."}`` is reported in
+    ``source_status`` and left out of the ensemble. That is how SHMÚ says
+    "this point is outside Slovakia" without failing the forecast.
+    """
     lat, lon = city["lat"], city["lon"]
     tz = city.get("timezone", "auto")
     name = city["name"]
+    days = max(1, min(int(forecast_days), 16))
 
     all_sources = {
-        "Open-Meteo":     (fetch_open_meteo,     (lat, lon, tz)),
+        "Open-Meteo":     (fetch_open_meteo,     (lat, lon, tz, days)),
         "wttr.in":        (fetch_wttr,           (name,)),
         "OpenWeatherMap": (fetch_openweather,    (lat, lon)),
         "WeatherAPI":     (fetch_weatherapi,     (lat, lon)),
         "VisualCrossing": (fetch_visual_crossing,(lat, lon)),
         "NOAA_NWS":       (fetch_noaa_nws,       (name, lat, lon)),
-        "ECMWF":          (fetch_ecmwf,          (lat, lon)),
+        "ECMWF":          (fetch_ecmwf,          (lat, lon, min(days, 10))),
+        "SHMU":           (fetch_shmu,           (lat, lon, tz)),
+        "SHMU-OBS":       (fetch_shmu_observation, (lat, lon)),
     }
 
-    allowed = _allowed_sources_for(name)
+    allowed = _allowed_sources_for(name) if respect_tiers else None
     if allowed is not None:
         all_sources = {k: v for k, v in all_sources.items() if k in allowed}
 
@@ -160,7 +170,9 @@ def fetch_all_sources(city):
             source = futures[future]
             try:
                 data = future.result()
-                if data:
+                if data and data.get("unavailable"):
+                    source_status[source] = data["unavailable"]
+                elif data:
                     results.append(data)
                     source_status[source] = "OK"
                 else:
@@ -171,31 +183,120 @@ def fetch_all_sources(city):
     return results, source_status
 
 
+def blend_hourly(results, get_weight, timezone_name="UTC", hours=48):
+    """Bias-free weighted hourly series across sources that publish hours.
+
+    Observation-only feeds (``role == "observation"``) are not forecast hours.
+    Times are the source's local ``hour`` strings. Hours before the current
+    local hour are dropped, then the list is capped.
+    """
+    by_hour = {}
+    for result in results:
+        if result.get("role") == "observation":
+            continue
+        source = result.get("source")
+        weight = get_weight(source, "temp_high")
+        wind_weight = get_weight(source, "wind")
+        precip_weight = get_weight(source, "precip_mm")
+        cond_weight = get_weight(source, "condition")
+        for hour in result.get("hourly") or []:
+            key = hour.get("hour")
+            if not key:
+                continue
+            slot = by_hour.setdefault(key, {
+                "temps": [], "precips": [], "probs": [], "winds": [], "conds": [],
+                "sources": {},
+            })
+            if hour.get("temp_c") is not None:
+                slot["temps"].append((hour["temp_c"], weight))
+            if hour.get("precip_mm") is not None:
+                slot["precips"].append((hour["precip_mm"], precip_weight))
+            if hour.get("precip_prob") is not None:
+                slot["probs"].append((hour["precip_prob"], precip_weight))
+            if hour.get("wind_kmh") is not None:
+                slot["winds"].append((hour["wind_kmh"], wind_weight))
+            if hour.get("condition"):
+                slot["conds"].append((hour["condition"], cond_weight))
+            slot["sources"][source] = {
+                "temp_c": hour.get("temp_c"),
+                "precip_mm": hour.get("precip_mm"),
+                "precip_prob": hour.get("precip_prob"),
+                "wind_kmh": hour.get("wind_kmh"),
+                "condition": hour.get("condition"),
+            }
+
+    if timezone_name and timezone_name != "auto":
+        try:
+            now_key = datetime.now(ZoneInfo(timezone_name)).strftime("%Y-%m-%dT%H:00")
+        except Exception:
+            now_key = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00")
+    else:
+        now_key = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:00")
+
+    keys = sorted(k for k in by_hour if k >= now_key)
+    if not keys:
+        keys = sorted(by_hour)[-hours:]
+    hourly = []
+    for key in keys[:hours]:
+        slot = by_hour[key]
+        temp_vals = [v for v, _ in slot["temps"]]
+        hourly.append({
+            "hour": key,
+            "temp_c": weighted_average(slot["temps"]),
+            "precip_mm": weighted_average(slot["precips"]),
+            "precip_prob": weighted_average(slot["probs"]),
+            "wind_kmh": weighted_average(slot["winds"]),
+            "condition": weighted_vote(slot["conds"]) if slot["conds"] else None,
+            "temp_spread_c": round(max(temp_vals) - min(temp_vals), 1) if len(temp_vals) > 1 else 0,
+            "sources": slot["sources"],
+        })
+    return hourly
+
+
 # ---------------------------------------------------------------------------
 # Build weighted forecast
 # ---------------------------------------------------------------------------
-def produce_forecast(city_name):
+def produce_forecast(city_name, location=None, forecast_days=7, respect_tiers=True):
     """Main function: produce a weighted ensemble forecast with physics corrections.
+
+    ``location``, when given, is a geocode dict and skips the name lookup.
+    ``forecast_days`` caps the daily list (sources that publish fewer days
+    simply stop early). ``respect_tiers`` keeps the cron cost split; the
+    public location API turns it off so any coordinate gets every source.
 
     Returns a comprehensive forecast dict.
     """
     # Resolve city
-    city = db.get_city(city_name)
-    if not city:
-        location = geocode(city_name)
-        if not location:
-            return {"error": f"Could not find city: {city_name}"}
+    if location:
+        named = location.get("name") or city_name
+        stored = db.get_city(named) if named else None
         city = {
-            "id": None, "name": location["name"], "country": location["country"],
-            "lat": location["lat"], "lon": location["lon"],
-            "timezone": location.get("timezone", "auto")
+            "id": stored["id"] if stored else None,
+            "name": named,
+            "country": location.get("country") or (stored or {}).get("country", ""),
+            "lat": location["lat"],
+            "lon": location["lon"],
+            "timezone": location.get("timezone") or (stored or {}).get("timezone", "auto"),
         }
+    else:
+        city = db.get_city(city_name)
+        if not city:
+            location = geocode(city_name)
+            if not location:
+                return {"error": f"Could not find city: {city_name}"}
+            city = {
+                "id": None, "name": location["name"], "country": location["country"],
+                "lat": location["lat"], "lon": location["lon"],
+                "timezone": location.get("timezone", "auto")
+            }
 
     # Load weights from database
     weights = db.get_weights(city["id"]) if city.get("id") else {}
 
     # Fetch fresh data
-    results, source_status = fetch_all_sources(city)
+    results, source_status = fetch_all_sources(
+        city, forecast_days=forecast_days, respect_tiers=respect_tiers
+    )
     if not results:
         return {"error": "No weather data from any source", "source_status": source_status}
 
@@ -241,7 +342,10 @@ def produce_forecast(city_name):
         "humidity_pct": avg_humidity,
         "wind_speed_kmh": avg_wind,
         "pressure_hpa": avg_pressure,
-        "conditions": [r["current"]["condition"] for r in results if r["current"].get("condition")],
+        "conditions": [
+            r["current"]["condition"] for r in results
+            if r.get("role") != "observation" and r["current"].get("condition")
+        ],
         "temp_spread_c": round(temp_spread, 1),
     }
 
@@ -286,7 +390,8 @@ def produce_forecast(city_name):
                 all_dates.add(d["date"])
 
     daily_forecast = []
-    for forecast_date in sorted(all_dates)[:7]:
+    day_limit = max(1, min(int(forecast_days), 16))
+    for forecast_date in sorted(all_dates)[:day_limit]:
         day_data = {"date": forecast_date, "per_source": {}}
 
         highs, lows, probs, precips, winds_d, conditions = [], [], [], [], [], []
@@ -385,12 +490,33 @@ def produce_forecast(city_name):
         else:
             source_info[source] = {"status": "cold start (equal weights)"}
 
-    # --- Hourly forecast (from Open-Meteo if available) ---
-    hourly_forecast = []
+    # --- Hourly forecast (weighted across sources that publish hours) ---
+    hourly_forecast = blend_hourly(
+        results, get_weight, timezone_name=city.get("timezone") or "UTC", hours=48,
+    )
+    if not hourly_forecast:
+        for r in results:
+            if r["source"] == "Open-Meteo" and r.get("hourly"):
+                hourly_forecast = r["hourly"]
+                break
+
+    current_by_source = {}
     for r in results:
-        if r["source"] == "Open-Meteo" and r.get("hourly"):
-            hourly_forecast = r["hourly"]
-            break
+        current_reading = r.get("current") or {}
+        current_by_source[r["source"]] = {
+            "temp_c": current_reading.get("temp_c"),
+            "feels_like_c": current_reading.get("feels_like_c"),
+            "humidity": current_reading.get("humidity"),
+            "wind_speed_kmh": current_reading.get("wind_speed_kmh"),
+            "wind_dir_deg": current_reading.get("wind_dir_deg"),
+            "pressure_hpa": current_reading.get("pressure_hpa"),
+            "precipitation_mm": current_reading.get("precipitation_mm"),
+            "condition": current_reading.get("condition"),
+            "role": r.get("role", "forecast"),
+            "station": r.get("station"),
+            "model": r.get("model"),
+            "observed_at": current_reading.get("observed_at") or current_reading.get("valid_time"),
+        }
 
     # --- ECMWF ensemble data (confidence intervals) ---
     ensemble_data = None
@@ -530,6 +656,7 @@ def produce_forecast(city_name):
         "current": current,
         "daily": daily_forecast,
         "hourly": hourly_forecast,
+        "current_by_source": current_by_source,
         "alerts": weatherapi_alerts,
         "ensemble_available": ensemble_data is not None,
         "mos": mos_summary,
