@@ -1,0 +1,11 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/mcp.schema.json",
+  "mcpServers": {
+    "open-meteo-weather": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["./server/index.js"],
+      "cwd": "${PLUGIN_ROOT}"
+    }
+  }
+}

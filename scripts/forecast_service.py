@@ -32,7 +32,7 @@ ATTRIBUTION = [
         "source": "SHMU",
         "license": "CC BY 4.0",
         "url": "https://opendata.shmu.sk",
-        "note": "ALADIN model and station observations, Slovak Hydrometeorological Institute",
+        "note": "ALADIN 4.5 km and automatic stations, © SHMÚ, CC BY 4.0. No 2 m humidity in the open GRIB. A-LAEF is not published on opendata.shmu.sk.",
     },
     {"source": "NOAA NWS", "license": "public domain", "url": "https://www.weather.gov"},
     {"source": "wttr.in", "url": "https://wttr.in"},

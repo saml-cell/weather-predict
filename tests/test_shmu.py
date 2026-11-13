@@ -7,6 +7,7 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from shmu import (
+    plugin_aladin_to_source,
     _within_horizon,
     aggregate_observation_rows,
     condition_from_fields,
@@ -96,6 +97,23 @@ class TestShmuHelpers(unittest.TestCase):
         self.assertIsNone(rows[1]["precip_mm"])
         self.assertEqual(rows[2]["precip_mm"], 3.2)
         self.assertEqual(rows[0]["temp_high_c"], 38.2)
+
+    def test_plugin_precip_is_hourly_not_a_running_total(self):
+        source = plugin_aladin_to_source({
+            "run": "20261112 1800 UTC",
+            "current": {"time": "2026-11-12T18:00", "temperature_c": 5.0, "precipitation_mm": 0.4,
+                        "wind_speed_kmh": 10, "pressure_hpa": 1010, "cloud_cover_percent": 80},
+            "hourly": [
+                {"time": "2026-11-12T18:00", "temperature_c": 5.0, "precipitation_mm": 0.4,
+                 "wind_speed_kmh": 10, "pressure_hpa": 1010, "cloud_cover_percent": 80},
+                {"time": "2026-11-12T19:00", "temperature_c": 4.5, "precipitation_mm": 0.6,
+                 "wind_speed_kmh": 12, "pressure_hpa": 1011, "cloud_cover_percent": 90},
+            ],
+        })
+        self.assertIsNone(source["hourly"][0]["precip_prob"])
+        self.assertIsNone(source["current"]["humidity"])
+        self.assertEqual(source["daily"][0]["precip_mm"], 1.0)
+        self.assertEqual(source["attribution"].startswith("© SHMÚ"), True)
 
     def test_horizon_keeps_steps_through_72_only(self):
         names = [f"al-grib_sk_{step:03d}-20261112-1800-nwp-.grb" for step in (0, 1, 72, 73, 102)]
