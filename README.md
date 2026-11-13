@@ -45,6 +45,10 @@ ALADIN/SHMÚ is GRIB2 on a 4.5 km Lambert grid: four runs a day (00, 06, 12, 18 
 
 Those validated daily files are the Slovak ground truth used in the committed accuracy report. Temperature there is the 21:00–21:00 local window and precipitation is 07:00–07:00. The minute feed is only the live observation and a short unvalidated check.
 
+Live SHMÚ decoding is the pure-JS implementation in `plugin/server/grib2.js` and `plugin/server/shmu.js`. The Python app calls that CLI, so there is not a second GRIB decoder. ALADIN precipitation in those files is a 1-hour total. The open files have no 2 m relative humidity, and A-LAEF is not on opendata.shmu.sk, so this app does not invent either. A station is used only when it is within 25 km and 100 m of the point's elevation. Credit © SHMÚ, CC BY 4.0.
+
+The same plugin also fetches Open-Meteo models, METAR, the ECMWF IFS ensemble, CAMS air quality, and MeteoAlarm warnings. MeteoAlarm data is CC BY 4.0; credit MeteoAlarm / EUMETNET and the national services when those warnings are shown.
+
 Outside Slovakia, SHMÚ returns `out_of_domain` and the other sources still produce the forecast.
 
 ## HTTP API

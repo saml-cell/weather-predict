@@ -1,0 +1,21 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "open-meteo-weather",
+  "description": "Current conditions and forecasts from the public sources Meteric documents: Open-Meteo (ECMWF / ICON / best match / CHMI ALADIN / ensembles), official SHM\u00da AWS stations and SHM\u00da ALADIN 4.5 km, METAR, CAMS air quality, and MeteoAlarm warnings. No API key required.",
+  "version": "0.1.0",
+  "author": {
+    "name": "Samuel Benda"
+  },
+  "keywords": [
+    "weather",
+    "forecast",
+    "open-meteo",
+    "geocoding",
+    "shmu",
+    "aladin",
+    "metar",
+    "ensemble",
+    "alerts",
+    "meteoalarm"
+  ]
+}

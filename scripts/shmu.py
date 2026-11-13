@@ -30,6 +30,7 @@ import math
 import os
 import re
 import shutil
+import subprocess
 import threading
 import xml.etree.ElementTree as ET
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -376,39 +377,161 @@ def observation_to_current(row, station):
     }
 
 
+_PLUGIN_CLI = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "plugin", "server", "cli.js",
+)
+
+
+def _utc_offset_seconds(tz_name):
+    zone = _zone(tz_name)
+    return int(datetime.now(zone).utcoffset().total_seconds())
+
+
+def _plugin_json(args, timeout=150):
+    """Run the plugin CLI. Stdout is one JSON object; logs stay on stderr."""
+    if not os.path.isfile(_PLUGIN_CLI):
+        raise RuntimeError(f"SHMU plugin CLI missing: {_PLUGIN_CLI}")
+    proc = subprocess.run(
+        ["node", _PLUGIN_CLI, *args],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        check=False,
+    )
+    if proc.returncode != 0 or not proc.stdout.strip():
+        detail = (proc.stderr or proc.stdout or "no output").strip()
+        raise RuntimeError(detail[-800:])
+    return json.loads(proc.stdout)
+
+
+def _condition_from_plugin_hour(hour):
+    cloud = hour.get("cloud_cover_percent")
+    fraction = None if cloud is None else float(cloud) / 100.0
+    return condition_from_fields(hour.get("temperature_c"), hour.get("precipitation_mm"), fraction)
+
+
+def plugin_aladin_to_source(aladin):
+    """Map the plugin's shmu_aladin series onto this app's source dict.
+
+    Precipitation is already a 1-hour accumulation in the GRIB (parameter 193).
+    It is not differenced again. 2 m relative humidity is left empty because
+    the published ALADIN files do not contain it. Precipitation probability
+    stays empty because A-LAEF is not on opendata.shmu.sk.
+    """
+    hourly = []
+    daily_rows = []
+    for hour in aladin.get("hourly") or []:
+        condition = _condition_from_plugin_hour(hour)
+        hourly.append({
+            "hour": hour.get("time"),
+            "temp_c": hour.get("temperature_c"),
+            "precip_mm": hour.get("precipitation_mm"),
+            "precip_prob": None,
+            "wind_kmh": hour.get("wind_speed_kmh"),
+            "wind_dir": hour.get("wind_direction_deg"),
+            "pressure_hpa": hour.get("pressure_hpa"),
+            "humidity": None,
+            "condition": condition,
+        })
+        daily_rows.append({
+            "time": hour.get("time"),
+            "temp_c": hour.get("temperature_c"),
+            "precip_mm": hour.get("precipitation_mm"),
+            "wind_kmh": hour.get("wind_speed_kmh"),
+            "wind_dir": hour.get("wind_direction_deg"),
+            "condition": condition,
+        })
+    current_hour = aladin.get("current") or (hourly[0] if hourly else None)
+    current = None
+    if current_hour:
+        current = {
+            "temp_c": current_hour.get("temperature_c") if "temperature_c" in current_hour else current_hour.get("temp_c"),
+            "feels_like_c": None,
+            "humidity": None,
+            "wind_speed_kmh": current_hour.get("wind_speed_kmh") or current_hour.get("wind_kmh"),
+            "wind_dir_deg": current_hour.get("wind_direction_deg") or current_hour.get("wind_dir"),
+            "precipitation_mm": current_hour.get("precipitation_mm") if "precipitation_mm" in current_hour else current_hour.get("precip_mm"),
+            "pressure_hpa": current_hour.get("pressure_hpa"),
+            "condition": current_hour.get("condition") or _condition_from_plugin_hour(current_hour),
+            "valid_time": current_hour.get("time") or current_hour.get("hour"),
+        }
+    return {
+        "source": "SHMU",
+        "role": "forecast",
+        "model": "ALADIN/SHMU 4.5km",
+        "run_id": aladin.get("run"),
+        "license": "CC BY 4.0",
+        "attribution": "© SHMÚ (Slovak Hydrometeorological Institute)",
+        "note": "2 m relative humidity is not in the ALADIN open files. A-LAEF is not published on opendata.shmu.sk, so precipitation probability is null.",
+        "current": current,
+        "daily": _daily_from_rows(daily_rows),
+        "hourly": hourly,
+    }
+
+
+def plugin_observation_to_source(observation):
+    """Map a qualifying SHMÚ AWS observation. Pressure is already mean sea level."""
+    station = observation.get("station") or {}
+    return {
+        "source": "SHMU-OBS",
+        "role": "observation",
+        "station": {
+            "id": station.get("ind_kli"),
+            "name": station.get("name"),
+            "distance_km": station.get("distance_km"),
+            "elevation_m": station.get("elevation_m"),
+            "elevation_difference_m": station.get("elevation_difference_m"),
+            "latitude": station.get("latitude"),
+            "longitude": station.get("longitude"),
+        },
+        "current": {
+            "temp_c": observation.get("temperature_c"),
+            "feels_like_c": None,
+            "humidity": observation.get("humidity_percent"),
+            "wind_speed_kmh": observation.get("wind_speed_kmh"),
+            "wind_dir_deg": observation.get("wind_direction_deg"),
+            "precipitation_mm": None,
+            "pressure_hpa": observation.get("pressure_hpa"),
+            "condition": "Unknown",
+            "observed_at": observation.get("time"),
+            "station": {
+                "id": station.get("ind_kli"),
+                "name": station.get("name"),
+                "distance_km": station.get("distance_km"),
+            },
+        },
+        "daily": [],
+        "hourly": [],
+        "license": "CC BY 4.0",
+        "attribution": "© SHMÚ (Slovak Hydrometeorological Institute)",
+    }
+
+
 def fetch_shmu_observation(lat, lon):
-    """Latest SHMÚ station observation near a point, or an unavailable marker."""
+    """Latest qualifying SHMÚ station observation, via the plugin decoder.
+
+    The plugin keeps a station only when it is within 25 km and 100 m of the
+    point's elevation. A nearer hill station is not used just because it is close.
+    """
     if not in_slovakia(lat, lon):
         return {"unavailable": "out_of_domain"}
     try:
-        stations = load_stations()
-        station = nearest_station(stations, lat, lon)
-        if station is None:
-            return {"unavailable": "no_station_nearby"}
-        today = datetime.now(timezone.utc).astimezone(ZoneInfo("Europe/Bratislava")).date()
-        filename = latest_observation_name(today)
-        if filename is None:
-            yesterday = today - timedelta(days=1)
-            filename = latest_observation_name(yesterday)
-            today = yesterday
-        if filename is None:
-            return None
-        payload = fetch_observation_file(today, filename)
-        row = station_row_from_payload(payload, station["ind_kli"])
-        if row is None:
-            return {"unavailable": "station_silent"}
-        current = observation_to_current(row, station)
-        return {
-            "source": "SHMU-OBS",
-            "role": "observation",
-            "station": current["station"],
-            "current": current,
-            "daily": [],
-            "hourly": [],
-        }
-    except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError, RuntimeError, ET.ParseError) as exc:
+        payload = _plugin_json([
+            "--cmd", "obs",
+            "--lat", str(lat),
+            "--lon", str(lon),
+            "--offset", str(_utc_offset_seconds("Europe/Bratislava")),
+        ])
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, RuntimeError) as exc:
         logger.warning("SHMU observation failed: %s", exc)
         return None
+    if payload.get("observation"):
+        return plugin_observation_to_source(payload["observation"])
+    warning = payload.get("observation_warning") or ""
+    if "25 km" in warning or "elevation" in warning:
+        return {"unavailable": "no_station_within_rule"}
+    return {"unavailable": warning or "no_station_nearby"}
 
 
 def _grib_step(name):
@@ -658,45 +781,30 @@ def _current_from_rows(rows):
 
 
 def fetch_shmu(lat, lon, tz="Europe/Bratislava"):
-    """ALADIN point forecast in the same shape as the other weather sources."""
+    """ALADIN point forecast decoded by plugin/server/grib2.js."""
     if not in_slovakia(lat, lon):
         return {"unavailable": "out_of_domain"}
-    if eccodes is None:
-        return None
     try:
-        payload = load_aladin_point(lat, lon, tz)
-    except (HTTPError, URLError, TimeoutError, OSError, RuntimeError, json.JSONDecodeError) as exc:
+        payload = _plugin_json([
+            "--cmd", "aladin",
+            "--lat", str(lat),
+            "--lon", str(lon),
+            "--days", "4",
+            "--offset", str(_utc_offset_seconds(tz)),
+        ])
+    except (OSError, subprocess.TimeoutExpired, json.JSONDecodeError, RuntimeError) as exc:
         logger.warning("SHMU ALADIN failed: %s", exc)
+        message = str(exc)
+        if "out_of_domain" in message or "outside the SHM" in message:
+            return {"unavailable": "out_of_domain"}
         return None
-    if not payload or payload.get("out_of_domain"):
+    warning = payload.get("aladin_warning") or ""
+    if warning == "out_of_domain" or "outside the SHM" in warning:
         return {"unavailable": "out_of_domain"}
-    rows = payload.get("rows") or []
-    if not rows:
+    aladin = payload.get("aladin")
+    if not aladin:
         return None
-    hourly = []
-    for row in rows:
-        hourly.append({
-            "hour": row["time"],
-            "temp_c": row.get("temp_c"),
-            "precip_mm": row.get("precip_mm"),
-            "precip_prob": None,
-            "wind_kmh": row.get("wind_kmh"),
-            "wind_dir": row.get("wind_dir"),
-            "pressure_hpa": row.get("pressure_hpa"),
-            "condition": row.get("condition"),
-        })
-    return {
-        "source": "SHMU",
-        "role": "forecast",
-        "model": "ALADIN/SHMU 4.5km",
-        "run_id": payload.get("run_id"),
-        "grid_distance_km": payload.get("distance_km"),
-        "license": "CC BY 4.0",
-        "attribution": "Slovak Hydrometeorological Institute (SHMÚ)",
-        "current": _current_from_rows(rows),
-        "daily": _daily_from_rows(rows),
-        "hourly": hourly,
-    }
+    return plugin_aladin_to_source(aladin)
 
 
 def collect_station_days(ind_kli, dates, workers=12):
@@ -788,47 +896,22 @@ def fetch_validated_daily(ind_kli, months):
 
 
 def aladin_daily_for_run(run_date, lat, lon, tz_name="Europe/Bratislava"):
-    """Daily aggregates from one 00 UTC ALADIN run already on the open-data server.
+    """Daily aggregates from one 00 UTC ALADIN run, decoded by the plugin.
 
-    ``run_date`` is a ``datetime.date``. Used by the backtest. Returns a list
-    of daily dicts in the station's local timezone.
+    ``run_date`` is a ``datetime.date``. Precipitation is the published
+    1-hour accumulation, summed over the local date.
     """
-    if eccodes is None:
-        raise RuntimeError("eccodes is not installed")
     day = run_date.strftime("%Y%m%d")
-    base = urljoin(ALADIN_ROOT, f"{day}/0000/")
-    names = _within_horizon([n for n in list_directory(base) if n.endswith(".grb")])
-    if not names:
+    payload = _plugin_json([
+        "--cmd", "aladin-run",
+        "--lat", str(lat),
+        "--lon", str(lon),
+        "--day", day,
+        "--cycle", "0000",
+        "--days", "4",
+        "--offset", str(_utc_offset_seconds(tz_name)),
+    ], timeout=180)
+    aladin = (payload or {}).get("aladin") or {}
+    if not aladin:
         return []
-    dest_dir = _cache_path("grib", f"{day}_0000")
-
-    def _one(name):
-        path = os.path.join(dest_dir, name)
-        _download(urljoin(base, quote(name)), path)
-        return name, path
-
-    files = []
-    with ThreadPoolExecutor(max_workers=12) as pool:
-        futures = [pool.submit(_one, name) for name in names]
-        for future in as_completed(futures):
-            try:
-                files.append(future.result())
-            except (HTTPError, URLError, TimeoutError, OSError):
-                continue
-    rows, distance = _series_from_files(files, lat, lon, tz_name)
-    if distance is not None and distance > _MAX_GRID_DISTANCE_KM:
-        return []
-    serial = []
-    for row in rows:
-        serial.append({
-            "time": row["local"].strftime("%Y-%m-%dT%H:%M"),
-            "valid_utc": row["valid"].strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "temp_c": row["temp_c"],
-            "precip_mm": row["precip_mm"],
-            "wind_kmh": row["wind_kmh"],
-            "wind_dir": row["wind_dir"],
-            "pressure_hpa": row["pressure_hpa"],
-            "cloud": row["cloud"],
-            "condition": row["condition"],
-        })
-    return _daily_from_rows(serial)
+    return plugin_aladin_to_source(aladin).get("daily") or []
