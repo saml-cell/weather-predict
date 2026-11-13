@@ -7,12 +7,14 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from scoring import (
+    align_hourly_to_shmu_days,
     brier_score,
     hit_rate,
     inverse_mae_weights,
     mae,
     precipitation_event,
     rmse,
+    shmu_climate_day_keys,
     weighted_values,
 )
 
@@ -49,6 +51,25 @@ class TestScores(unittest.TestCase):
     def test_weighted_values_renormalise(self):
         value = weighted_values({"a": 10, "b": None}, {"a": 0.25, "b": 0.75})
         self.assertEqual(value, 10)
+
+    def test_shmu_climate_windows(self):
+        # 21:00 stays on that date; 22:00 belongs to the next temperature day.
+        self.assertEqual(shmu_climate_day_keys("2026-08-01T21:00")[0], "2026-08-01")
+        self.assertEqual(shmu_climate_day_keys("2026-08-01T22:00")[0], "2026-08-02")
+        # 07:00 ends the previous precip day; 08:00 starts the current one.
+        self.assertEqual(shmu_climate_day_keys("2026-08-02T07:00")[1], "2026-08-01")
+        self.assertEqual(shmu_climate_day_keys("2026-08-02T08:00")[1], "2026-08-02")
+
+    def test_align_hourly_requires_enough_hours(self):
+        times = [f"2026-08-02T{hour:02d}:00" for hour in range(24)]
+        temps = [10.0] * 24
+        temps[15] = 18.0
+        precips = [0.0] * 24
+        precips[8] = 2.0
+        rows = align_hourly_to_shmu_days(times, temps, precips, min_temp_hours=18, min_precip_hours=20)
+        # 00:00-21:00 on the 2nd is 22 hours, enough for a temperature day.
+        self.assertEqual(rows["2026-08-02"]["temp_high_c"], 18.0)
+        self.assertIsNotNone(rows["2026-08-02"]["temp_low_c"])
 
 
 if __name__ == "__main__":

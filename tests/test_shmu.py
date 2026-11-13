@@ -7,12 +7,14 @@ import unittest
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
 
 from shmu import (
+    _within_horizon,
     aggregate_observation_rows,
     condition_from_fields,
     haversine_km,
     in_slovakia,
     nearest_station,
     parse_stations_xml,
+    parse_validated_daily,
     precip_increments,
     wind_from_components,
 )
@@ -80,6 +82,25 @@ class TestShmuHelpers(unittest.TestCase):
         self.assertEqual(daily[0]["temp_low_c"], 4.0)
         self.assertEqual(daily[0]["precip_mm"], 1.2)
         self.assertEqual(daily[1]["precip_mm"], 0.0)
+
+    def test_validated_daily_drops_missing_and_sentinels(self):
+        payload = {"data": [
+            {"ind_kli": 11813, "datum": "2026-08-01T00:00:00", "t_max": 38.2, "t_min": 24.6, "zra_uhrn": None},
+            {"ind_kli": 11813, "datum": "2026-08-02T00:00:00", "t_max": 30.0, "t_min": 18.0, "zra_uhrn": -1},
+            {"ind_kli": 11816, "datum": "2026-08-01T00:00:00", "t_max": 36.0, "t_min": 22.0, "zra_uhrn": 0.4},
+            {"ind_kli": 11813, "datum": "2026-08-03T00:00:00", "t_max": 22.0, "t_min": 14.0, "zra_uhrn": 3.2},
+        ]}
+        rows = parse_validated_daily(payload, 11813)
+        self.assertEqual([row["date"] for row in rows], ["2026-08-01", "2026-08-02", "2026-08-03"])
+        self.assertIsNone(rows[0]["precip_mm"])
+        self.assertIsNone(rows[1]["precip_mm"])
+        self.assertEqual(rows[2]["precip_mm"], 3.2)
+        self.assertEqual(rows[0]["temp_high_c"], 38.2)
+
+    def test_horizon_keeps_steps_through_72_only(self):
+        names = [f"al-grib_sk_{step:03d}-20261112-1800-nwp-.grb" for step in (0, 1, 72, 73, 102)]
+        kept = _within_horizon(names)
+        self.assertEqual(kept, names[:3])
 
 
 if __name__ == "__main__":

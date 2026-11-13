@@ -29,6 +29,7 @@ from urllib.request import Request, urlopen
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from scoring import (
+    align_hourly_to_shmu_days,
     brier_score,
     hit_rate,
     inverse_mae_weights,
@@ -95,6 +96,22 @@ def fetch_historical_model(model, start, end):
     )
     raw = _get_json(url)
     return _rows(raw.get("daily") or {}, precip_prob=True)
+
+
+def fetch_hourly(base, model, start, end, lat, lon):
+    params = {
+        "latitude": lat,
+        "longitude": lon,
+        "start_date": start.isoformat(),
+        "end_date": end.isoformat(),
+        "hourly": "temperature_2m,precipitation",
+        "timezone": TIMEZONE,
+    }
+    if model:
+        params["models"] = model
+    raw = _get_json(_daily_url(base, params))
+    hourly = raw.get("hourly") or {}
+    return hourly.get("time") or [], hourly.get("temperature_2m") or [], hourly.get("precipitation") or []
 
 
 def _rows(daily, precip_prob):
@@ -270,11 +287,14 @@ def shmu_section(shmu_days, skip_aladin):
     return {
         "station": station,
         "dates": [d.isoformat() for d in dates],
+        "observation_kind": "unvalidated_1min_aws",
         "definition": (
-            "SHMU truth is the sum/max/min of 1-minute AWS rows on the civil date. "
-            "ALADIN is the previous day's 00 UTC run, aggregated on the same civil date "
-            "(about 24-47 h lead). Precipitation probability for ALADIN is deterministic: "
-            f"1 when the daily total is at least {WET_MM} mm."
+            "Near-real-time SHMU automatic-station minutes are unvalidated. "
+            "Truth here is the max, min and sum of those minutes on the civil date. "
+            "ALADIN is the previous day's 00 UTC run (one of the four daily cycles), "
+            "steps through 72 h, aggregated on the same civil date. "
+            f"Precipitation probability for ALADIN is 1 when the daily total is at least {WET_MM} mm. "
+            "The validated daily climate files are a separate section; they do not cover these dates yet."
         ),
         "against_shmu_station": score_window(
             {"SHMU": aladin_rows, "Open-Meteo-archive-grid": archive},
@@ -287,6 +307,107 @@ def shmu_section(shmu_days, skip_aladin):
     }
 
 
+def validated_climate_section():
+    """Score replayable models against validated SHMU daily climate.
+
+    ALADIN GRIB on the open-data server currently starts on 2026-10-13, while
+    the validated daily files currently end with 2026-08, so this section
+    cannot score ALADIN itself. It scores Open-Meteo and ECMWF historical
+    runs, which do cover that period, at the station coordinates.
+    """
+    import shmu
+
+    station_id = 11813
+    stations = shmu.load_stations()
+    station = next((row for row in stations if row["ind_kli"] == station_id), None)
+    if station is None:
+        raise RuntimeError("Bratislava-Koliba (11813) missing from the station list")
+    months = [f"2026-{month:02d}" for month in range(1, 9)]
+    print(f"Validated daily climate for {station['name']} months {months[0]}..{months[-1]}", flush=True)
+    observed = shmu.fetch_validated_daily(station_id, months)
+    obs_rows = {}
+    for row in observed:
+        precip = row["precip_mm"]
+        obs_rows[row["date"]] = {
+            "temp_high_c": row["temp_high_c"],
+            "temp_low_c": row["temp_low_c"],
+            "precip_mm": precip,
+        }
+    if len(obs_rows) < 60:
+        raise RuntimeError(f"Only {len(obs_rows)} validated days")
+
+    start = date.fromisoformat(min(obs_rows)) - timedelta(days=1)
+    end = date.fromisoformat(max(obs_rows)) + timedelta(days=1)
+    lat = station["lat"]
+    lon = station["lon"]
+    print(f"Hourly archive and historical forecasts {start} .. {end}", flush=True)
+    archive_h = fetch_hourly(
+        "https://archive-api.open-meteo.com/v1/archive", None, start, end, lat, lon,
+    )
+    open_meteo_h = fetch_hourly(
+        "https://historical-forecast-api.open-meteo.com/v1/forecast",
+        "best_match", start, end, lat, lon,
+    )
+    ecmwf_h = fetch_hourly(
+        "https://historical-forecast-api.open-meteo.com/v1/forecast",
+        "ecmwf_ifs025", start, end, lat, lon,
+    )
+    archive_days = align_hourly_to_shmu_days(*archive_h)
+    source_rows = {
+        "Open-Meteo": align_hourly_to_shmu_days(*open_meteo_h),
+        "ECMWF": align_hourly_to_shmu_days(*ecmwf_h),
+    }
+    # Archive is the comparison grid, not a forecast. Keep it out of the ensemble.
+    days = sorted(
+        set(obs_rows)
+        & set(source_rows["Open-Meteo"])
+        & set(source_rows["ECMWF"])
+    )
+    # Hold out July-August. Weights use January-June only.
+    train_days = [day for day in days if day < "2026-07-01"]
+    test_days = [day for day in days if day >= "2026-07-01"]
+    train_mae = {}
+    for name, rows in source_rows.items():
+        train_mae[name] = mae(
+            [rows[day]["temp_high_c"] for day in train_days],
+            [obs_rows[day]["temp_high_c"] for day in train_days],
+        )
+    weights = inverse_mae_weights(train_mae)
+    equal = {name: 1.0 / len(source_rows) for name in source_rows}
+    return {
+        "station": {
+            "ind_kli": station_id,
+            "name": station["name"],
+            "lat": lat,
+            "lon": lon,
+        },
+        "observation_kind": "validated_daily_climate",
+        "files": "https://opendata.shmu.sk/meteorology/climate/recent/data/daily/",
+        "months_requested": months,
+        "n_station_days": len(obs_rows),
+        "definition": (
+            "Ground truth is SHMU validated daily climate, not the gitignored database "
+            "and not the unvalidated minute feed. t_max and t_min are the 21:00-21:00 "
+            "local window. zra_uhrn is the 07:00-07:00 local window. Model hours are "
+            "aggregated to those same windows before scoring. Open-Meteo precipitation "
+            "is the preceding-hour sum. A wet day is at least 1 mm. Model probabilities "
+            "are deterministic (1 when the window total is at least 1 mm) because the "
+            "published daily probability uses a different day definition. "
+            "ALADIN GRIB retention on the server starts 2026-10-13, after this validated "
+            "file ends, so ALADIN is not in this table."
+        ),
+        "window": {"start": days[0], "end": days[-1], "n_days": len(days)},
+        "train_window": {"start": train_days[0], "end": train_days[-1], "n_days": len(train_days)},
+        "test_window": {"start": test_days[0], "end": test_days[-1], "n_days": len(test_days)},
+        "train_mae_temperature_max_c": {key: round_or_none(value) for key, value in train_mae.items()},
+        "test": score_window(source_rows, obs_rows, test_days, weights),
+        "full_window_equal_weight": score_window(source_rows, obs_rows, days, equal),
+        "archive_grid_vs_station_full_window": score_window(
+            {"Open-Meteo-archive": archive_days}, obs_rows, days, {"Open-Meteo-archive": 1.0},
+        )["Open-Meteo-archive"],
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description="Backtest Bratislava forecast accuracy")
     parser.add_argument("--days", type=int, default=24, help="Archive window ending yesterday")
@@ -294,7 +415,31 @@ def main():
     parser.add_argument("--shmu-days", type=int, default=3, help="Recent days scored against SHMU minutes")
     parser.add_argument("--skip-shmu", action="store_true")
     parser.add_argument("--skip-aladin", action="store_true")
+    parser.add_argument(
+        "--only-validated",
+        action="store_true",
+        help="Add the validated-climate section to the existing report and leave the rest",
+    )
     args = parser.parse_args()
+
+    if args.only_validated:
+        if os.path.isfile(REPORT_PATH):
+            with open(REPORT_PATH, encoding="utf-8") as handle:
+                report = json.load(handle)
+        else:
+            report = {}
+        report["shmu_validated_daily"] = validated_climate_section()
+        report["generated_at"] = datetime.now(timezone.utc).isoformat()
+        os.makedirs(os.path.dirname(REPORT_PATH), exist_ok=True)
+        with open(REPORT_PATH, "w", encoding="utf-8") as handle:
+            json.dump(report, handle, indent=2)
+        test = report["shmu_validated_daily"]["test"]["ensemble"]["temperature_max_c"]
+        print(
+            f"Validated-climate test ensemble max MAE {test['mae']} RMSE {test['rmse']} n={test['n']}",
+            flush=True,
+        )
+        print(f"Updated {REPORT_PATH}", flush=True)
+        return
 
     today = date.today()
     end = today - timedelta(days=1)
@@ -340,6 +485,7 @@ def main():
             "Ensemble weights for the test window are inverse-MAE on daily maximum temperature, fit only on the train window.",
             "The equal-weight ensemble is reported on the full window and does not use the train split.",
             "wttr.in, OpenWeatherMap, WeatherAPI and Visual Crossing are not in this file: they have no keyless forecast archive to replay.",
+            "The old README MOS skill table is not reproduced. It was computed from data/weather.db, which is gitignored, and no results file was checked in with it.",
         ],
         "train_mae_temperature_max_c": {k: round_or_none(v) for k, v in train_mae.items()},
         "test": score_window(source_rows, obs, test_days, weights),
@@ -357,7 +503,15 @@ def main():
             print(f"SHMU section failed: {exc}", flush=True)
         with open(REPORT_PATH, "w", encoding="utf-8") as handle:
             json.dump(report, handle, indent=2)
-        print(f"Updated {REPORT_PATH} with SHMU", flush=True)
+        print(f"Updated {REPORT_PATH} with SHMU minutes", flush=True)
+    try:
+        report["shmu_validated_daily"] = validated_climate_section()
+    except Exception as exc:
+        report["shmu_validated_daily"] = {"error": str(exc)}
+        print(f"Validated climate section failed: {exc}", flush=True)
+    with open(REPORT_PATH, "w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+    print(f"Updated {REPORT_PATH} with validated daily climate", flush=True)
     test_ens = report["test"]["ensemble"]["temperature_max_c"]
     print(
         f"Test ensemble daily-max MAE {test_ens['mae']} RMSE {test_ens['rmse']} n={test_ens['n']}",

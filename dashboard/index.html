@@ -462,15 +462,19 @@
         const response = await fetch("/api/v1/accuracy");
         if (!response.ok) return;
         const report = await response.json();
-        const test = report.test || {};
+        const validated = report.shmu_validated_daily && report.shmu_validated_daily.test;
+        const test = validated || report.test || {};
         const rows = Object.entries(test).map(([name, scores]) => {
           const temp = (scores.temperature_max_c || {});
           const precip = scores.precipitation || {};
           return `<tr><td>${name}</td><td>${temp.mae ?? "—"}</td><td>${temp.rmse ?? "—"}</td><td>${precip.brier ?? "—"}</td><td>${precip.hit_rate ?? "—"}</td><td>${temp.n ?? precip.n ?? "—"}</td></tr>`;
         }).join("");
-        const window = report.test_window || {};
+        const window = (validated && report.shmu_validated_daily.test_window) || report.test_window || {};
+        const caption = validated
+          ? `Held-out ${window.start || ""} to ${window.end || ""} against validated SHMÚ daily climate at Bratislava-Koliba. Temperature uses the 21:00–21:00 local window. Precipitation event ≥ 1 mm on days with a reported total.`
+          : `Held-out ${window.start || ""} to ${window.end || ""}, daily maximum temperature in °C. Precipitation event ≥ 1 mm.`;
         $("accuracy").innerHTML = `
-          <p class="status">Held-out ${window.start || ""} to ${window.end || ""}, daily maximum temperature in °C. Precipitation event ≥ 1 mm. Lower MAE, RMSE and Brier are better.</p>
+          <p class="status">${caption} Lower MAE, RMSE and Brier are better.</p>
           <table>
             <thead><tr><th>Source</th><th>MAE</th><th>RMSE</th><th>Brier</th><th>Hit rate</th><th>n</th></tr></thead>
             <tbody>${rows}</tbody>

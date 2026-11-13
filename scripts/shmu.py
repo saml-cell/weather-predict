@@ -3,10 +3,14 @@
 
 Two public datasets, both CC BY 4.0, no API key:
 
-* ALADIN/SHMU 4.5 km GRIB2 forecasts
-  https://opendata.shmu.sk/meteorology/weather/nwp/aladin/
-* 1-minute automatic weather station observations
+* ALADIN/SHMU GRIB2, 4.5 km Lambert, four runs a day (00/06/12/18 UTC),
+  72 hours at 1-hour steps. No registration. About 3-4 hours of latency.
+  https://opendata.shmu.sk/meteorology/weather/nwp/aladin/sk/4.5km/YYYYMMDD/HHMM/
+* Unvalidated 1-minute automatic station JSON (near real time)
   https://opendata.shmu.sk/meteorology/climate/now/
+* Validated daily climate JSON. Temperature is the 21:00-21:00 local window.
+  Precipitation is the 07:00-07:00 local window. Files lag by about two months.
+  https://opendata.shmu.sk/meteorology/climate/recent/data/daily/
 * Station coordinates from the official climatological-station WFS
   https://arcgis.shmu.sk/
 
@@ -45,6 +49,11 @@ except ImportError:  # pragma: no cover - exercised only when the extra is missi
 OPENDATA = "https://opendata.shmu.sk"
 ALADIN_ROOT = OPENDATA + "/meteorology/weather/nwp/aladin/sk/4.5km/"
 OBS_ROOT = OPENDATA + "/meteorology/climate/now/data/"
+DAILY_CLIMATE_ROOT = OPENDATA + "/meteorology/climate/recent/data/daily/"
+# Documented forecast length. Some 00 UTC directories also keep later steps;
+# the ensemble uses the 72-hour product.
+MAX_ALADIN_STEP = 72
+ALADIN_RUNS = ("0000", "0600", "1200", "1800")
 STATION_WFS = (
     "https://arcgis.shmu.sk/arcgis/services/public/"
     "SietKlimatologickychStanic/MapServer/WFSServer"
@@ -402,14 +411,38 @@ def fetch_shmu_observation(lat, lon):
         return None
 
 
+def _grib_step(name):
+    match = _GRIB_RE.search(name)
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _within_horizon(names, max_step=MAX_ALADIN_STEP):
+    """Keep one file per step from 0 through the documented 72-hour horizon."""
+    chosen = {}
+    for name in names:
+        step = _grib_step(name)
+        if step is None or step > max_step or step in chosen:
+            continue
+        chosen[step] = name
+    return [chosen[step] for step in sorted(chosen)]
+
+
 def _latest_run():
-    """Return (date_folder, run_folder, file_names) for the newest ALADIN run."""
+    """Return (date_folder, run_folder, file_names) for the newest ALADIN run.
+
+    Runs are 00, 06, 12 and 18 UTC. The newest directory that already has
+    GRIB files wins, which skips a cycle that has not finished uploading.
+    """
     days = sorted(n.strip("/") for n in list_directory(ALADIN_ROOT) if n.endswith("/"))
     for day in reversed(days):
-        runs = sorted(n.strip("/") for n in list_directory(urljoin(ALADIN_ROOT, day + "/")) if n.endswith("/"))
-        for run in reversed(runs):
+        present = {n.strip("/") for n in list_directory(urljoin(ALADIN_ROOT, day + "/")) if n.endswith("/")}
+        for run in reversed(ALADIN_RUNS):
+            if run not in present:
+                continue
             base = urljoin(ALADIN_ROOT, f"{day}/{run}/")
-            files = [n for n in list_directory(base) if n.endswith(".grb")]
+            files = _within_horizon([n for n in list_directory(base) if n.endswith(".grb")])
             if files:
                 return day, run, files
     return None
@@ -699,6 +732,61 @@ def collect_station_days(ind_kli, dates, workers=12):
     return aggregate_observation_rows(rows)
 
 
+def parse_validated_daily(payload, ind_kli):
+    """Rows from one monthly validated-climate file for a single station.
+
+    ``t_max`` / ``t_min`` and ``zra_uhrn`` keep SHMÚ's own missing values as
+    None. Negative sentinels (the files use -1 for some unused elements) are
+    treated as missing for precipitation.
+    """
+    rows = []
+    for record in payload.get("data") or []:
+        if record.get("ind_kli") != ind_kli:
+            continue
+        day = str(record.get("datum") or "")[:10]
+        if len(day) != 10:
+            continue
+        rows.append({
+            "date": day,
+            "temp_high_c": _climate_number(record.get("t_max"), low=-70, high=60),
+            "temp_low_c": _climate_number(record.get("t_min"), low=-70, high=60),
+            "precip_mm": _climate_number(record.get("zra_uhrn"), low=0, high=500),
+        })
+    rows.sort(key=lambda row: row["date"])
+    return rows
+
+
+def _climate_number(value, low, high):
+    if value is None or value == "":
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    if number < low or number > high:
+        return None
+    return number
+
+
+def fetch_validated_daily(ind_kli, months):
+    """Download validated daily climate months (``YYYY-MM``) for one station.
+
+    Months that are not published yet are skipped. The open-data listing in
+    November 2026 stopped at 2026-08.
+    """
+    rows = []
+    for month in months:
+        folder = month.strip("/")
+        url = urljoin(DAILY_CLIMATE_ROOT, f"{folder}/kli-inter%20-%20{folder}.json")
+        try:
+            payload = json.loads(_http_text(url, timeout=90))
+        except (HTTPError, URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            logger.warning("Validated climate %s skipped: %s", month, exc)
+            continue
+        rows.extend(parse_validated_daily(payload, ind_kli))
+    return rows
+
+
 def aladin_daily_for_run(run_date, lat, lon, tz_name="Europe/Bratislava"):
     """Daily aggregates from one 00 UTC ALADIN run already on the open-data server.
 
@@ -709,7 +797,7 @@ def aladin_daily_for_run(run_date, lat, lon, tz_name="Europe/Bratislava"):
         raise RuntimeError("eccodes is not installed")
     day = run_date.strftime("%Y%m%d")
     base = urljoin(ALADIN_ROOT, f"{day}/0000/")
-    names = [n for n in list_directory(base) if n.endswith(".grb")]
+    names = _within_horizon([n for n in list_directory(base) if n.endswith(".grb")])
     if not names:
         return []
     dest_dir = _cache_path("grib", f"{day}_0000")
