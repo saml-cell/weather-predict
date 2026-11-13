@@ -53,24 +53,38 @@ logger = logging.getLogger(__name__)
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import db
+from init_db import create_schema
 from fetch_weather import geocode
 from weighted_forecast import produce_forecast
+import forecast_service
 from seasonal_forecast import produce_seasonal_forecast, format_json_output
 from climate_indices import get_current_index_state, build_climatology
 from alerts import check_city_alerts
-import mos_inference
-
-# Boot-time MOS load: feature_set mismatch must crash the worker, not silently serve broken forecasts
 try:
-    _mos_boot_info = mos_inference.model_info()
-    logger.info(
-        "MOS boot check OK: feature_set=%s model_version=%s trained_at=%s boosters=%d",
-        _mos_boot_info["feature_set"], _mos_boot_info["model_version"],
-        _mos_boot_info["trained_at"], _mos_boot_info["booster_count"],
-    )
-except Exception as _e:
-    logger.error("MOS boot check FAILED: %s", _e)
-    raise
+    import mos_inference
+except Exception as _mos_import_error:
+    mos_inference = None
+    logger.error("MOS import failed, continuing without it: %s", _mos_import_error)
+
+try:
+    create_schema()
+except Exception as _db_init_error:
+    logger.error("Database schema init failed: %s", _db_init_error)
+
+# MOS is an optional post-processor. A missing model stack must not take down
+# the HTTP service — forecasts still come from the live ensemble.
+_mos_boot_info = {"error": "not installed"}
+if mos_inference is not None:
+    try:
+        _mos_boot_info = mos_inference.model_info()
+        logger.info(
+            "MOS boot check OK: feature_set=%s model_version=%s trained_at=%s boosters=%d",
+            _mos_boot_info["feature_set"], _mos_boot_info["model_version"],
+            _mos_boot_info["trained_at"], _mos_boot_info["booster_count"],
+        )
+    except Exception as _e:
+        logger.error("MOS unavailable, continuing without it: %s", _e)
+        _mos_boot_info = {"error": str(_e)}
 
 _PROJECT_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _config_file_lock = threading.Lock()
@@ -866,6 +880,73 @@ def api_mos_skill():
     })
 
 
+@app.route("/api/v1/geocode", methods=["GET"])
+def geocode_v1():
+    """Place search for the web and iOS clients."""
+    if not _check_rate_limit(request.remote_addr or "unknown", "api_read"):
+        return jsonify({"error": "Rate limit exceeded"}), 429
+    query = (request.args.get("q") or "").strip()
+    if not query:
+        return jsonify({"error": "Query required"}), 400
+    try:
+        count = int(request.args.get("count", 5))
+    except (TypeError, ValueError):
+        count = 5
+    try:
+        results = forecast_service.geocode_search(query, count=count)
+    except Exception:
+        logger.exception("Geocode failed")
+        return jsonify({"error": "Geocoding failed"}), 502
+    return jsonify({"results": results})
+
+
+@app.route("/api/v1/forecast", methods=["GET"])
+def forecast_v1():
+    """Ensemble forecast for a coordinate or a place name.
+
+    Query: ``lat`` and ``lon``, or ``place``. Optional ``days`` (1-10).
+    """
+    if not _check_rate_limit(request.remote_addr or "unknown", "api_read"):
+        return jsonify({"error": "Rate limit exceeded"}), 429
+    place = request.args.get("place")
+    lat = request.args.get("lat")
+    lon = request.args.get("lon")
+    try:
+        days = int(request.args.get("days", 10))
+    except (TypeError, ValueError):
+        return jsonify({"error": "days must be an integer"}), 400
+    try:
+        payload, status = forecast_service.build_forecast(
+            place=place, lat=lat, lon=lon, days=days,
+        )
+    except Exception:
+        logger.exception("Forecast failed")
+        return jsonify({"error": "Forecast failed"}), 500
+    return jsonify(payload), status
+
+
+@app.route("/api/v1/accuracy", methods=["GET"])
+def accuracy_v1():
+    """Last committed verification report. Numbers come from a real backtest run."""
+    report_path = os.path.join(_PROJECT_DIR, "reports", "bratislava_accuracy.json")
+    if not os.path.isfile(report_path):
+        return jsonify({
+            "error": "No accuracy report yet. Run python scripts/backtest_accuracy.py",
+        }), 404
+    try:
+        with open(report_path, encoding="utf-8") as handle:
+            report = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        logger.exception("Accuracy report unreadable")
+        return jsonify({"error": "Accuracy report unreadable"}), 500
+    return jsonify(report)
+
+
+@app.route("/legacy")
+def serve_legacy():
+    return send_from_directory(_DASHBOARD_DIR, "legacy.html")
+
+
 @app.route("/api/health", methods=["GET"])
 def health_check():
     cities = db.get_all_cities()
@@ -882,7 +963,7 @@ def health_check():
         db_size_mb = round(os.path.getsize(db.DB_PATH) / (1024 * 1024), 2)
 
     try:
-        mos = mos_inference.model_info()
+        mos = mos_inference.model_info() if mos_inference is not None else {"error": "not installed"}
     except Exception as e:
         mos = {"error": str(e)}
 

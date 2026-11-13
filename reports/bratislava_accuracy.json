@@ -1,0 +1,487 @@
+{
+  "location": {
+    "name": "Bratislava",
+    "latitude": 48.15,
+    "longitude": 17.11,
+    "timezone": "Europe/Bratislava"
+  },
+  "generated_at": "2026-11-13T09:34:18.475865+00:00",
+  "observation_source": "Open-Meteo archive API (ERA5 / observation blend)",
+  "forecast_source": "Open-Meteo historical forecast API, previous model runs",
+  "window": {
+    "start": "2026-10-20",
+    "end": "2026-11-12",
+    "n_days": 24
+  },
+  "train_window": {
+    "start": "2026-10-20",
+    "end": "2026-11-04",
+    "n_days": 16
+  },
+  "test_window": {
+    "start": "2026-11-05",
+    "end": "2026-11-12",
+    "n_days": 8
+  },
+  "notes": [
+    "Temperature scores are degrees Celsius for the daily maximum and minimum.",
+    "A wet day is precipitation of at least 1.0 mm.",
+    "Open-Meteo publishes a daily precipitation probability; ECMWF here is deterministic, so its probability is 1 when the forecast total is at least the wet-day threshold.",
+    "Ensemble weights for the test window are inverse-MAE on daily maximum temperature, fit only on the train window.",
+    "The equal-weight ensemble is reported on the full window and does not use the train split.",
+    "wttr.in, OpenWeatherMap, WeatherAPI and Visual Crossing are not in this file: they have no keyless forecast archive to replay.",
+    "The old README MOS skill table is not reproduced. It was computed from data/weather.db, which is gitignored, and no results file was checked in with it."
+  ],
+  "train_mae_temperature_max_c": {
+    "Open-Meteo": 0.319,
+    "ECMWF": 0.194
+  },
+  "test": {
+    "Open-Meteo": {
+      "temperature_max_c": {
+        "n": 8,
+        "mae": 0.438,
+        "rmse": 0.468
+      },
+      "temperature_min_c": {
+        "n": 8,
+        "mae": 1.387,
+        "rmse": 1.508
+      },
+      "precipitation": {
+        "n": 8,
+        "wet_days": 2,
+        "threshold_mm": 1.0,
+        "brier": 0.007,
+        "hit_rate": 1.0,
+        "probability": "published"
+      }
+    },
+    "ECMWF": {
+      "temperature_max_c": {
+        "n": 8,
+        "mae": 0.362,
+        "rmse": 0.451
+      },
+      "temperature_min_c": {
+        "n": 8,
+        "mae": 0.725,
+        "rmse": 0.921
+      },
+      "precipitation": {
+        "n": 8,
+        "wet_days": 2,
+        "threshold_mm": 1.0,
+        "brier": 0.0,
+        "hit_rate": 1.0,
+        "probability": "deterministic_from_amount"
+      }
+    },
+    "ensemble": {
+      "temperature_max_c": {
+        "n": 8,
+        "mae": 0.35,
+        "rmse": 0.412
+      },
+      "temperature_min_c": {
+        "n": 8,
+        "mae": 0.791,
+        "rmse": 0.953
+      },
+      "precipitation": {
+        "n": 8,
+        "wet_days": 2,
+        "threshold_mm": 1.0,
+        "brier": 0.007,
+        "hit_rate": 1.0,
+        "probability": "published"
+      },
+      "weights": {
+        "Open-Meteo": 0.412,
+        "ECMWF": 0.588
+      }
+    }
+  },
+  "full_window_equal_weight": {
+    "Open-Meteo": {
+      "temperature_max_c": {
+        "n": 24,
+        "mae": 0.358,
+        "rmse": 0.4
+      },
+      "temperature_min_c": {
+        "n": 24,
+        "mae": 1.087,
+        "rmse": 1.237
+      },
+      "precipitation": {
+        "n": 24,
+        "wet_days": 9,
+        "threshold_mm": 1.0,
+        "brier": 0.095,
+        "hit_rate": 0.875,
+        "probability": "published"
+      }
+    },
+    "ECMWF": {
+      "temperature_max_c": {
+        "n": 24,
+        "mae": 0.25,
+        "rmse": 0.318
+      },
+      "temperature_min_c": {
+        "n": 24,
+        "mae": 0.642,
+        "rmse": 0.788
+      },
+      "precipitation": {
+        "n": 24,
+        "wet_days": 9,
+        "threshold_mm": 1.0,
+        "brier": 0.042,
+        "hit_rate": 0.958,
+        "probability": "deterministic_from_amount"
+      }
+    },
+    "ensemble": {
+      "temperature_max_c": {
+        "n": 24,
+        "mae": 0.275,
+        "rmse": 0.319
+      },
+      "temperature_min_c": {
+        "n": 24,
+        "mae": 0.627,
+        "rmse": 0.781
+      },
+      "precipitation": {
+        "n": 24,
+        "wet_days": 9,
+        "threshold_mm": 1.0,
+        "brier": 0.095,
+        "hit_rate": 0.875,
+        "probability": "published"
+      },
+      "weights": {
+        "Open-Meteo": 0.5,
+        "ECMWF": 0.5
+      }
+    }
+  },
+  "shmu": {
+    "station": {
+      "ind_kli": 11813,
+      "name": "Bratislava-Koliba",
+      "lat": 48.16822644,
+      "lon": 17.10718577,
+      "distance_km": 2.04
+    },
+    "dates": [
+      "2026-11-10",
+      "2026-11-11",
+      "2026-11-12"
+    ],
+    "definition": "SHMU truth is the sum/max/min of 1-minute AWS rows on the civil date. ALADIN is the previous day's 00 UTC run, aggregated on the same civil date (about 24-47 h lead). Precipitation probability for ALADIN is deterministic: 1 when the daily total is at least 1.0 mm.",
+    "against_shmu_station": {
+      "SHMU": {
+        "temperature_max_c": {
+          "n": 3,
+          "mae": 0.867,
+          "rmse": 0.891
+        },
+        "temperature_min_c": {
+          "n": 3,
+          "mae": 0.667,
+          "rmse": 0.833
+        },
+        "precipitation": {
+          "n": 3,
+          "wet_days": 3,
+          "threshold_mm": 1.0,
+          "brier": 0.667,
+          "hit_rate": 0.333,
+          "probability": "deterministic_from_amount"
+        }
+      },
+      "Open-Meteo-archive-grid": {
+        "temperature_max_c": {
+          "n": 3,
+          "mae": 0.833,
+          "rmse": 0.889
+        },
+        "temperature_min_c": {
+          "n": 3,
+          "mae": 0.433,
+          "rmse": 0.48
+        },
+        "precipitation": {
+          "n": 3,
+          "wet_days": 3,
+          "threshold_mm": 1.0,
+          "brier": 0.333,
+          "hit_rate": 0.667,
+          "probability": "deterministic_from_amount"
+        }
+      },
+      "ensemble": {
+        "temperature_max_c": {
+          "n": 3,
+          "mae": 0.85,
+          "rmse": 0.857
+        },
+        "temperature_min_c": {
+          "n": 3,
+          "mae": 0.55,
+          "rmse": 0.569
+        },
+        "precipitation": {
+          "n": 3,
+          "wet_days": 3,
+          "threshold_mm": 1.0,
+          "brier": 0.333,
+          "hit_rate": 0.667,
+          "probability": "published"
+        },
+        "weights": {
+          "SHMU": 1.0,
+          "Open-Meteo-archive-grid": 1.0
+        }
+      }
+    },
+    "shmu_observations": {
+      "2026-11-09": {
+        "temp_high_c": 5.1,
+        "temp_low_c": 5.0,
+        "precip_mm": 0.0
+      },
+      "2026-11-10": {
+        "temp_high_c": 6.1,
+        "temp_low_c": 1.7,
+        "precip_mm": 8.22
+      },
+      "2026-11-11": {
+        "temp_high_c": 4.5,
+        "temp_low_c": 1.0,
+        "precip_mm": 1.5
+      },
+      "2026-11-12": {
+        "temp_high_c": 7.8,
+        "temp_low_c": 4.3,
+        "precip_mm": 12.49
+      }
+    },
+    "aladin_forecasts": {
+      "2026-11-10": {
+        "temp_high_c": 7.0,
+        "temp_low_c": 2.5,
+        "precip_mm": 0.62,
+        "precip_probability": null
+      },
+      "2026-11-11": {
+        "temp_high_c": 5.1,
+        "temp_low_c": -0.2,
+        "precip_mm": 0.23,
+        "precip_probability": null
+      },
+      "2026-11-12": {
+        "temp_high_c": 8.9,
+        "temp_low_c": 4.3,
+        "precip_mm": 2.52,
+        "precip_probability": null
+      }
+    }
+  },
+  "shmu_validated_daily": {
+    "station": {
+      "ind_kli": 11813,
+      "name": "Bratislava-Koliba",
+      "lat": 48.16822644,
+      "lon": 17.10718577
+    },
+    "observation_kind": "validated_daily_climate",
+    "files": "https://opendata.shmu.sk/meteorology/climate/recent/data/daily/",
+    "months_requested": [
+      "2026-01",
+      "2026-02",
+      "2026-03",
+      "2026-04",
+      "2026-05",
+      "2026-06",
+      "2026-07",
+      "2026-08"
+    ],
+    "n_station_days": 243,
+    "definition": "Ground truth is SHMU validated daily climate, not the gitignored database and not the unvalidated minute feed. t_max and t_min are the 21:00-21:00 local window. zra_uhrn is the 07:00-07:00 local window. Model hours are aggregated to those same windows before scoring. Open-Meteo precipitation is the preceding-hour sum. A wet day is at least 1 mm. Model probabilities are deterministic (1 when the window total is at least 1 mm) because the published daily probability uses a different day definition. ALADIN GRIB retention on the server starts 2026-10-13, after this validated file ends, so ALADIN is not in this table.",
+    "window": {
+      "start": "2026-01-01",
+      "end": "2026-08-31",
+      "n_days": 243
+    },
+    "train_window": {
+      "start": "2026-01-01",
+      "end": "2026-06-30",
+      "n_days": 181
+    },
+    "test_window": {
+      "start": "2026-07-01",
+      "end": "2026-08-31",
+      "n_days": 62
+    },
+    "train_mae_temperature_max_c": {
+      "Open-Meteo": 1.044,
+      "ECMWF": 1.402
+    },
+    "test": {
+      "Open-Meteo": {
+        "temperature_max_c": {
+          "n": 62,
+          "mae": 1.598,
+          "rmse": 1.769
+        },
+        "temperature_min_c": {
+          "n": 62,
+          "mae": 0.545,
+          "rmse": 0.65
+        },
+        "precipitation": {
+          "n": 25,
+          "wet_days": 7,
+          "threshold_mm": 1.0,
+          "brier": 0.28,
+          "hit_rate": 0.72,
+          "probability": "deterministic_from_amount"
+        }
+      },
+      "ECMWF": {
+        "temperature_max_c": {
+          "n": 62,
+          "mae": 1.884,
+          "rmse": 2.097
+        },
+        "temperature_min_c": {
+          "n": 62,
+          "mae": 1.247,
+          "rmse": 1.496
+        },
+        "precipitation": {
+          "n": 25,
+          "wet_days": 7,
+          "threshold_mm": 1.0,
+          "brier": 0.4,
+          "hit_rate": 0.6,
+          "probability": "deterministic_from_amount"
+        }
+      },
+      "ensemble": {
+        "temperature_max_c": {
+          "n": 62,
+          "mae": 1.717,
+          "rmse": 1.853
+        },
+        "temperature_min_c": {
+          "n": 62,
+          "mae": 0.619,
+          "rmse": 0.777
+        },
+        "precipitation": {
+          "n": 25,
+          "wet_days": 7,
+          "threshold_mm": 1.0,
+          "brier": 0.4,
+          "hit_rate": 0.6,
+          "probability": "published"
+        },
+        "weights": {
+          "Open-Meteo": 0.568,
+          "ECMWF": 0.432
+        }
+      }
+    },
+    "full_window_equal_weight": {
+      "Open-Meteo": {
+        "temperature_max_c": {
+          "n": 243,
+          "mae": 1.185,
+          "rmse": 1.397
+        },
+        "temperature_min_c": {
+          "n": 243,
+          "mae": 0.56,
+          "rmse": 0.741
+        },
+        "precipitation": {
+          "n": 103,
+          "wet_days": 43,
+          "threshold_mm": 1.0,
+          "brier": 0.165,
+          "hit_rate": 0.835,
+          "probability": "deterministic_from_amount"
+        }
+      },
+      "ECMWF": {
+        "temperature_max_c": {
+          "n": 243,
+          "mae": 1.525,
+          "rmse": 1.817
+        },
+        "temperature_min_c": {
+          "n": 243,
+          "mae": 1.341,
+          "rmse": 1.726
+        },
+        "precipitation": {
+          "n": 103,
+          "wet_days": 43,
+          "threshold_mm": 1.0,
+          "brier": 0.175,
+          "hit_rate": 0.825,
+          "probability": "deterministic_from_amount"
+        }
+      },
+      "ensemble": {
+        "temperature_max_c": {
+          "n": 243,
+          "mae": 1.337,
+          "rmse": 1.563
+        },
+        "temperature_min_c": {
+          "n": 243,
+          "mae": 0.831,
+          "rmse": 1.101
+        },
+        "precipitation": {
+          "n": 103,
+          "wet_days": 43,
+          "threshold_mm": 1.0,
+          "brier": 0.175,
+          "hit_rate": 0.825,
+          "probability": "published"
+        },
+        "weights": {
+          "Open-Meteo": 0.5,
+          "ECMWF": 0.5
+        }
+      }
+    },
+    "archive_grid_vs_station_full_window": {
+      "temperature_max_c": {
+        "n": 243,
+        "mae": 1.148,
+        "rmse": 1.381
+      },
+      "temperature_min_c": {
+        "n": 243,
+        "mae": 0.882,
+        "rmse": 1.115
+      },
+      "precipitation": {
+        "n": 103,
+        "wet_days": 43,
+        "threshold_mm": 1.0,
+        "brier": 0.243,
+        "hit_rate": 0.757,
+        "probability": "deterministic_from_amount"
+      }
+    }
+  }
+}

@@ -1,269 +1,158 @@
 # Weather Predict
 
-A production weather intelligence system that combines **7 weather APIs**, **51-member ensemble forecasting**, **ML models**, and **meteorological physics** to produce accurate, transparent forecasts with a live dashboard.
+A multi-source weather app. It fetches the public forecasts you already had (Open-Meteo, wttr.in, OpenWeatherMap, WeatherAPI, Visual Crossing, NOAA NWS, ECMWF), adds SHMÚ open data over Slovakia, and blends them with the existing accuracy weights and physics corrections.
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue)
-![Flask](https://img.shields.io/badge/Flask-3.x-green)
-![License](https://img.shields.io/badge/License-MIT-yellow)
-![Sources](https://img.shields.io/badge/Weather_Sources-7-orange)
-![Tests](https://img.shields.io/badge/Tests-53_passing-brightgreen)
+The same JSON the website uses is the contract for a future iOS client.
 
-## Verified Skill (30-day rolling, live DB)
-
-MOS post-processing improvement over the raw multi-source ensemble, averaged across all 51 tracked cities:
-
-| Variable | MOS MAE | Ensemble MAE | Uplift |
-|---|---|---|---|
-| Temperature (°C) | 1.10 | 1.25 | **+11.7%** |
-| Humidity (%) | 7.18 | 7.84 | **+8.4%** |
-| Wind speed (km/h) | 3.22 | 3.62 | **+11.1%** |
-| Precipitation (mm) | 0.081 | 0.111 | **+27.0%** |
-
-Numbers computed nightly from `mos_daily_skill` via `mos_shadow_verify.py`. Live data: `GET /api/mos/skill`. These are honest holdout MAE numbers — no cherry-picking, no marketing inflation.
-
-## What It Does
-
-Instead of trusting a single weather source, this system **fetches forecasts from 7 different APIs**, scores them against actual observations, and builds a **Bayesian-weighted ensemble** that automatically learns which source is most accurate for each city and metric. On top of that:
-
-- A **physics correction layer** applies meteorological formulas (dew point, pressure trends, Clausius-Clapeyron) with bias correction
-- A **51-member ECMWF ensemble** provides confidence intervals and probabilistic precipitation forecasts
-- **4 ML models + BMA** generate seasonal outlooks using 19 climate teleconnection indices
-- An **animated hourly map** shows rain radar, wind arrows, and temperature gradients with time-lapse playback
-
-### Key Features
-
-- **7 Weather Sources** — Open-Meteo, wttr.in, OpenWeatherMap, WeatherAPI, Visual Crossing, NOAA NWS, ECMWF IFS
-- **51-Member Ensemble** — ECMWF IFS ensemble with percentile confidence intervals (p10/p25/p75/p90)
-- **Bayesian Accuracy Weighting** — Each source earns trust based on its track record, with exponential decay and bias correction
-- **Physics-Informed Corrections** — Dew point depression, pressure tendency, heat index (NWS Rothfusz), wind chill, Clausius-Clapeyron (with NWP double-counting guard)
-- **Seasonal Outlooks** — 1-12 month forecasts using 4 ML models combined with skill-score-weighted Bayesian Model Averaging
-- **19 Climate Indices** — ENSO, NAO, AO, PDO, AMO, QBO, MJO, IOD, and more from NOAA, with season-stratified weighting
-- **Air Quality Index** — EPA AQI scale, PM2.5, PM10, and pollutant data from WeatherAPI
-- **Official Weather Alerts** — Severe weather warnings from weather services + physics-based threshold alerts (heat index, wind chill, multi-day flood risk)
-- **Animated Hourly Map** — Time-lapse playback with rain radar (RainViewer), wind arrows, temperature gradient, and layer toggles
-- **Live Dashboard** — React 18 SPA with interactive maps (Leaflet), charts (Chart.js), source comparison, and Learn Mode
-- **Full Transparency** — Every forecast shows which sources contributed, their weights, RMSE, bias, and what corrections were applied
-
-## How It Works
-
-```
-┌──────────────────────────────────────────────────────────┐
-│                    DATA COLLECTION                        │
-│  Open-Meteo · wttr.in · OWM · WeatherAPI · VisualCrossing│
-│  NOAA NWS (US) · ECMWF IFS (51-member ensemble)         │
-└──────────────┬───────────────────────────────────────────┘
-               │
-               ▼
-┌──────────────────────────────────────────────────────────┐
-│          LAYER 1: BIAS-CORRECTED BAYESIAN ENSEMBLE        │
-│  Per-source bias subtraction before averaging             │
-│  Per-source, per-metric accuracy weights (MAE + RMSE)     │
-│  Exponential decay (15-day half-life)                     │
-│  Graduated condition scoring (adjacency-based similarity) │
-└──────────────┬───────────────────────────────────────────┘
-               │
-               ▼
-┌──────────────────────────────────────────────────────────┐
-│           LAYER 2: PHYSICS CORRECTIONS                    │
-│  Dew point → precipitation adjustment                     │
-│  Pressure trend → weather change prediction               │
-│  C-C scaling (analog/composite only, NWP guard)           │
-│  Heat index / Wind chill → feels-like temperature         │
-└──────────────┬───────────────────────────────────────────┘
-               │
-               ▼
-┌──────────────────────────────────────────────────────────┐
-│        ENSEMBLE ENRICHMENT & VERIFICATION                 │
-│  51-member ECMWF confidence intervals                     │
-│  Fetch actual observations from archive API               │
-│  Score each source against reality (MAE + RMSE)           │
-│  Update Bayesian weights for next cycle                   │
-└──────────────────────────────────────────────────────────┘
-```
-
-### Seasonal Forecasting Pipeline
-
-For longer-range outlooks (1-12 months):
-
-1. **Climate Index Analysis** — Downloads 19 teleconnection indices from NOAA (ONI, NAO, AO, PDO, AMO, MJO, QBO, IOD, and more)
-2. **Analog Method** — Finds the 10 most similar historical climate patterns with season-stratified index weighting (NAO 1.8x in winter, MJO 1.5x in DJF)
-3. **Ridge Regression** — Z-score standardized predictors, leave-one-out cross-validation
-4. **Composite Method** — ENSO + NAO stratified classification with sample-size confidence
-5. **ECMWF SEAS5** — European Centre dynamical model output via Open-Meteo
-6. **Skill-Weighted BMA** — Combines all 4 methods using historical RPSS/ACC verification scores (with 3-tier fallback)
-
-## Quick Start
+## One-command local run
 
 ```bash
-# Clone
-git clone https://github.com/saml-cell/weather-predict.git
-cd weather-predict
+./scripts/dev.sh
+```
 
-# Install dependencies
+Then open http://localhost:5000 . Bratislava is the default place:
+
+http://localhost:5000/?lat=48.15&lon=17.11
+
+`dev.sh` installs `requirements.txt`, copies `.env.example` to `.env` when needed, creates the SQLite database, and starts the API. Optional keys live only in `.env`, which is gitignored.
+
+```bash
+python3 -m pytest tests/ -q
+```
+
+## Sources and keys
+
+| Source | Key | Role |
+| --- | --- | --- |
+| Open-Meteo | none | Forecast, geocoding, archive used for verification |
+| wttr.in | none | Forecast |
+| ECMWF IFS via Open-Meteo | none | Forecast plus 51-member spread |
+| NOAA NWS | none | United States forecasts |
+| SHMÚ ALADIN 4.5 km | none | Point forecast over Slovakia, from GRIB2 on opendata.shmu.sk |
+| SHMÚ automatic stations | none | Current observation and Slovak verification |
+| OpenWeatherMap | `OPENWEATHER_API_KEY` | Optional forecast |
+| WeatherAPI | `WEATHERAPI_KEY` | Optional forecast, air quality, alerts |
+| Visual Crossing | `VISUAL_CROSSING_KEY` | Optional forecast |
+
+SHMÚ data is published with no registration under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/deed.en). Attribute the Slovak Hydrometeorological Institute. The server stores your IP for at most 30 days; see https://opendata.shmu.sk/README.txt .
+
+ALADIN/SHMÚ is GRIB2 on a 4.5 km Lambert grid: four runs a day (00, 06, 12, 18 UTC), 72 hours at 1-hour steps, usually available 3–4 hours after the run. The forecast uses the newest run that has finished uploading, and only steps 0–72. Paths:
+
+- `https://opendata.shmu.sk/meteorology/weather/nwp/aladin/sk/4.5km/YYYYMMDD/HHMM/`
+- Field list: `https://opendata.shmu.sk/meteorology/weather/nwp/metadata/OpenData_AladinSHMU_metadata.json`
+- Unvalidated 1-minute station JSON: `https://opendata.shmu.sk/meteorology/climate/now/`
+- Validated daily climate JSON (about two months behind): `https://opendata.shmu.sk/meteorology/climate/recent/data/daily/`
+
+Those validated daily files are the Slovak ground truth used in the committed accuracy report. Temperature there is the 21:00–21:00 local window and precipitation is 07:00–07:00. The minute feed is only the live observation and a short unvalidated check.
+
+Outside Slovakia, SHMÚ returns `out_of_domain` and the other sources still produce the forecast.
+
+## HTTP API
+
+`GET /api/v1/forecast?lat=48.15&lon=17.11`
+
+`GET /api/v1/forecast?place=Bratislava`
+
+`days` is optional (1–10, default 10).
+
+The body has:
+
+- `location`
+- `current` with `ensemble`, `confidence` (`label`, `score`, `spread_c`) and `sources`
+- `hourly` for the next 48 hours, each hour with `ensemble` and `sources`
+- `daily` for up to 10 days, same split
+- `sources` status list so a failed feed does not look like silence
+- `attribution`
+
+`SHMU` is the ALADIN forecast. `SHMU-OBS` is the nearest automatic station and is an observation, not a model. It votes on current conditions and is shown on its own. It is not used as a future forecast.
+
+`GET /api/v1/geocode?q=Bratislava` returns place matches.
+
+`GET /api/v1/accuracy` returns the last backtest file, `reports/bratislava_accuracy.json`.
+
+Older city-id routes (`/api/forecast/<city_id>`, seasonal outlooks, alerts) are still mounted. The previous dashboard is at `/legacy`.
+
+Responses are cached in memory for 15 minutes per rounded coordinate. ALADIN GRIB files and the parsed point series are cached on disk under `data/cache/` (gitignored). A source that errors is recorded in `sources` and dropped from the blend.
+
+`POST` and `DELETE` still require `X-API-Key` when `WEATHER_API_KEY` is set.
+
+## Accuracy
+
+The numbers that count are the ones in `reports/bratislava_accuracy.json`. An older README table of MOS skill (about 1.1°C temperature MAE and similar humidity, wind and precipitation figures) came from `data/weather.db`. That database is gitignored and the table had no checked-in results file, so it is not repeated here.
+
+Headline from the committed file, validated SHMÚ daily climate at Bratislava-Koliba, January–August 2026. Hours were aggregated to the station’s own windows. The July–August holdout was not used to set weights.
+
+| Source | Test max MAE | Test n | Full-period max MAE | Full-period precip hit rate |
+| --- | --- | --- | --- | --- |
+| Open-Meteo | 1.598°C | 62 | 1.185°C (n=243) | 0.835 (103 days with a reported total) |
+| ECMWF | 1.884°C | 62 | 1.525°C (n=243) | 0.825 |
+| Equal-weight ensemble | 1.717°C | 62 | 1.337°C (n=243) | 0.825 |
+
+The Open-Meteo archive analysis, scored the same way, has daily-max MAE 1.148°C against Koliba (n=243). Most of the forecast error above is the station-versus-grid gap, including hourly sampling of the peak, not lead time. Against the Open-Meteo archive at 48.15, 17.11 for 24 calendar days the equal-weight ensemble daily-max MAE is 0.275°C. That comparison is in the same JSON under `full_window_equal_weight` and is a different question (model versus its own analysis family).
+
+Regenerate the report with:
+
+```bash
+python3 scripts/backtest_accuracy.py
+```
+
+It has three comparisons, all computed by that script:
+
+- Open-Meteo and ECMWF historical runs versus the Open-Meteo archive at 48.15, 17.11, on calendar days.
+- The same models versus SHMÚ validated daily climate at Bratislava-Koliba for January–August 2026. Hours are aggregated to SHMÚ’s 21:00–21:00 temperature window and 07:00–07:00 precipitation window before scoring. July–August is held out from the weight fit.
+- A short unvalidated minute-station check of the previous day’s 00 UTC ALADIN run. ALADIN files on the server currently start on 2026-10-13, and the validated daily files currently end with 2026-08, so those two do not overlap.
+
+A wet day is at least 1 mm. Hit rate is the fraction of correct wet/dry calls. wttr.in and the keyed commercial APIs stay in the live blend and out of this file: they have no keyless forecast archive.
+
+## Deploy
+
+Docker:
+
+```bash
+docker build -t weather-predict .
+docker run --env-file .env -p 5000:5000 weather-predict
+```
+
+The image runs gunicorn with two workers and a 120 second timeout so the first Slovak request can download an ALADIN run.
+
+Without Docker, from the repo root:
+
+```bash
 pip install -r requirements.txt
-
-# Copy and edit environment variables
-cp .env.example .env
-# Edit .env to add your API keys (optional — works with free sources)
-
-# Initialize the database
-python scripts/init_db.py
-
-# Add cities to track
-python scripts/add_city.py "New York" London Tokyo Sydney Paris
-
-# Run the full pipeline (fetch → index → model → verify)
-python scripts/orchestrate.py --step all
-
-# Start the dashboard
-python scripts/api.py
-# → Open http://localhost:5000
+gunicorn -w 2 -b 0.0.0.0:5000 --timeout 120 scripts.api:app
 ```
 
-### API Keys (All Optional — Free Tiers)
+Set `WEATHER_API_KEY` before the port is reachable beyond your own machine. `CORS_ORIGINS` can pin allowed origins. The database file is `data/weather.db`.
 
-The system works out of the box with 3 free sources (Open-Meteo, wttr.in, ECMWF via Open-Meteo). Add more for better ensemble accuracy:
+## What an iOS client can reuse
 
-| Source | Free Tier | Get Key |
-|--------|-----------|---------|
-| OpenWeatherMap | 1M calls/month | [openweathermap.org](https://openweathermap.org/api) |
-| WeatherAPI | 1M calls/month, includes AQI + alerts | [weatherapi.com](https://www.weatherapi.com) |
-| Visual Crossing | 1,000 records/day | [visualcrossing.com](https://www.visualcrossing.com/sign-up) |
-| ECMWF CDS | Unlimited (for direct access) | [copernicus.eu](https://cds.climate.copernicus.eu) |
-| NOAA NWS | Unlimited, US only | No key needed |
+Keep using `GET /api/v1/forecast` and `GET /api/v1/geocode`. Temperatures are Celsius, wind is km/h, pressure is hPa, precipitation is millimetres, probabilities are percent. `units` repeats that. No API key is required for reads.
+
+Still to do on the device, not in this repo:
+
+- Sign in to Apple location services and call the same `lat`/`lon` endpoint.
+- Cache the last successful payload for offline launch. The server cache is 15 minutes and is not a sync store.
+- Map `condition` strings to SF Symbols.
+- If you want the seasonal outlook or the tracked-city MOS adjustment, those remain on the older `/api/seasonal/<city_id>` and `/api/forecast/<city_id>` routes and need a city id in SQLite.
+
+## Layout
+
+```
+scripts/api.py                HTTP server and the versioned routes
+scripts/forecast_service.py   place resolution, cache, iOS-shaped JSON
+scripts/weighted_forecast.py  Bayesian weights, physics, hourly blend
+scripts/fetch_weather.py      existing forecast sources
+scripts/shmu.py               SHMÚ stations, observations, ALADIN GRIB2
+scripts/scoring.py            MAE, RMSE, Brier, hit rate
+scripts/backtest_accuracy.py  writes the Bratislava report
+dashboard/index.html          phone and desktop UI
+dashboard/legacy.html         previous dashboard
+```
+
+## Tests
 
 ```bash
-# Add to .env
-OPENWEATHER_API_KEY=your_key
-WEATHERAPI_KEY=your_key
-VISUAL_CROSSING_KEY=your_key
-ECMWF_API_KEY=your_key
+python3 -m pytest tests/ -q
 ```
 
-## Dashboard
-
-### Features
-- **Interactive Map** with city markers, radar overlay (RainViewer), and city weather previews
-- **Animated Hourly Mode** — play/pause time-lapse with rain, wind arrows, and temperature gradient layers
-- **City Detail** — current conditions, 7-day forecast (card layout on mobile), source accuracy charts
-- **Seasonal Outlook** — tercile probability charts, climate index state, teleconnection narratives
-- **Learn Mode** — click any metric to understand the math behind it
-- **Mobile-First** — responsive design with 44px touch targets, city switcher, pull-to-refresh, safe-area support
-
-## API Endpoints
-
-| Endpoint | Method | Auth | Description |
-|----------|--------|------|-------------|
-| `/api/cities` | GET | No | List all tracked cities |
-| `/api/cities` | POST | Key | Add a new city |
-| `/api/cities/<id>` | DELETE | Key | Remove a city |
-| `/api/forecast/<id>` | GET | No | Weighted ensemble forecast with confidence intervals |
-| `/api/hourly/<id>` | GET | No | Hourly forecast data for map overlays |
-| `/api/observations/<id>` | GET | No | Historical observations |
-| `/api/accuracy/<id>` | GET | No | Source accuracy weights, MAE, RMSE, bias |
-| `/api/trends/<id>` | GET | No | Temperature, precip, pressure trends |
-| `/api/compare/<id>` | GET | No | Side-by-side source comparison |
-| `/api/seasonal/<id>` | GET | No | Seasonal outlook (1-12 months) |
-| `/api/indices` | GET | No | Current teleconnection index state (19 indices) |
-| `/api/alerts` | GET | No | Official + threshold weather alerts |
-| `/api/health` | GET | No | System health check |
-| `/api/cache/invalidate` | POST | Key | Clear forecast cache |
-
-## Running in Production
-
-### Management CLI
-
-```bash
-weather-ctl doctor        # Full diagnostic
-weather-ctl status        # Quick health check
-weather-ctl restart       # Restart API (gunicorn, 2 workers)
-weather-ctl logs 100      # Last 100 log lines
-weather-ctl fetch         # Trigger data fetch
-weather-ctl pipeline      # Full pipeline (fetch + model + verify)
-weather-ctl verify        # Run verification & scoring
-weather-ctl cleanup       # Prune old data
-weather-ctl key           # Show API key
-weather-ctl key regen     # Rotate API key
-```
-
-### Cron Schedule
-
-```bash
-0 */6 * * *  weather-ctl fetch              # Fetch forecasts every 6h
-30 */6 * * * python3 scripts/collect_forecasts.py  # Archive forecasts
-0 0 * * *    weather-ctl verify             # Verify accuracy at midnight
-0 3 * * 0    python3 scripts/climate_indices.py --force  # Refresh indices weekly
-15 */6 * * * python3 scripts/alerts.py      # Check alerts
-```
-
-### Systemd Service
-
-```ini
-# ~/.config/systemd/user/weather-api.service
-[Unit]
-Description=Weather Predict Dashboard API
-
-[Service]
-WorkingDirectory=/path/to/weather-predict
-ExecStart=/usr/bin/gunicorn -w 2 -b 0.0.0.0:5000 scripts.api:app
-Restart=always
-
-[Install]
-WantedBy=default.target
-```
-
-## Project Structure
-
-```
-weather-predict/
-├── scripts/
-│   ├── api.py                  # Flask REST API + dashboard server
-│   ├── fetch_weather.py        # 7-source API data collection
-│   ├── weighted_forecast.py    # Bias-corrected Bayesian ensemble
-│   ├── meteo.py                # Meteorological physics engine
-│   ├── verify_and_score.py     # Accuracy verification (MAE + RMSE)
-│   ├── climate_indices.py      # 19 NOAA teleconnection indices + MJO
-│   ├── seasonal_model.py       # 4 ML models + skill-weighted BMA
-│   ├── seasonal_forecast.py    # Seasonal outlook generator
-│   ├── alerts.py               # Official + threshold alert detection
-│   ├── db.py                   # SQLite layer (thread-local, WAL mode)
-│   ├── orchestrate.py          # Pipeline orchestrator
-│   ├── collect_forecasts.py    # Scheduled data collection
-│   ├── weather_telegram.py     # Telegram bot integration
-│   ├── init_db.py              # Database schema + migrations
-│   └── add_city.py             # City management utility
-├── dashboard/
-│   └── index.html              # React 18 SPA (Tailwind, Leaflet, Chart.js)
-├── tests/
-│   ├── test_meteo.py           # Physics module tests (41 tests)
-│   └── test_db.py              # Database layer tests (12 tests)
-├── data/                       # SQLite database (auto-created, gitignored)
-├── config.json                 # All configuration parameters
-├── requirements.txt            # Python dependencies
-├── .env.example                # API key template
-└── weather-ctl                 # Management CLI
-```
-
-## Tech Stack
-
-- **Backend**: Python 3.10+, Flask, NumPy, SciPy
-- **Database**: SQLite with WAL mode and thread-local connection pooling
-- **Frontend**: React 18, Tailwind CSS, Leaflet maps, Chart.js
-- **ML**: Ridge regression (z-score standardized), analog pattern matching, composite analysis, ECMWF SEAS5, Bayesian Model Averaging
-- **Data Sources**: Open-Meteo, wttr.in, OpenWeatherMap, WeatherAPI, Visual Crossing, NOAA NWS, ECMWF IFS (ensemble)
-- **Climate Data**: 19 NOAA teleconnection indices including ENSO, NAO, AO, PDO, AMO, MJO, QBO, IOD
-
-## Data Attribution
-
-Weather data provided by:
-- [OpenWeather](https://openweathermap.org) (ODbL license)
-- [WeatherAPI.com](https://www.weatherapi.com)
-- [Visual Crossing](https://www.visualcrossing.com)
-- [Open-Meteo](https://open-meteo.com) (CC BY 4.0)
-- [NOAA National Weather Service](https://www.weather.gov)
-- [ECMWF](https://www.ecmwf.int) via Open-Meteo
-- [RainViewer](https://www.rainviewer.com) (radar tiles)
-
-## License
-
-MIT
+The ensemble tests stub the network. They check that one live source still returns current, hourly and daily values when the others fail, and that the public JSON keeps per-source numbers beside the ensemble.
