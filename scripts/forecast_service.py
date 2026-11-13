@@ -265,6 +265,7 @@ def to_public_forecast(raw):
             "sunrise": day.get("sunrise"),
             "sunset": day.get("sunset"),
             "confidence": _confidence(d_label, d_score, spread_d),
+            "weights": day.get("skill_weights"),
             "ensemble": {
                 "temperature_max_c": high,
                 "temperature_min_c": low,
@@ -308,6 +309,7 @@ def to_public_forecast(raw):
         "hourly": hourly,
         "daily": daily,
         "sources": statuses,
+        "weights": raw.get("skill_weights"),
         "attribution": ATTRIBUTION,
         "generated_at": raw.get("generated_at"),
     }

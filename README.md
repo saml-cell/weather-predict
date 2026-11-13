@@ -70,6 +70,8 @@ The body has:
 
 `GET /api/v1/accuracy` returns the last backtest file, `reports/bratislava_accuracy.json`.
 
+The ensemble weights each forecast source by inverse MAE for that variable and lead, from `reports/skill_weights.json`. That file is measured against Bratislava-Koliba: validated daily climate for the long record, and the last eight days of hourly station samples against Open-Meteo previous runs for lead 1 and leads 2–3. A source needs at least seven days. SHMÚ ALADIN and wttr.in do not have that history, so they keep an equal share. If fewer than two sources qualify, the blend is equal weights. The response field is `weights`, and the page prints the temperature-max share on each source chip.
+
 Older city-id routes (`/api/forecast/<city_id>`, seasonal outlooks, alerts) are still mounted. The previous dashboard is at `/legacy`.
 
 Responses are cached in memory for 15 minutes per rounded coordinate. ALADIN GRIB files and the parsed point series are cached on disk under `data/cache/` (gitignored). A source that errors is recorded in `sources` and dropped from the blend.

@@ -32,6 +32,7 @@ from fetch_weather import (
 )
 from meteo import apply_physics_corrections, dew_point, dew_point_depression, feels_like
 from shmu import fetch_shmu, fetch_shmu_observation
+from skill_weights import METRIC_TO_VARIABLE, load_table, resolve_weights
 
 # MOS inference — optional; failure here must not break the rest of the forecast
 try:
@@ -183,6 +184,32 @@ def fetch_all_sources(city, forecast_days=7, respect_tiers=True):
     return results, source_status
 
 
+def _lead_days_for_stamp(stamp, timezone_name):
+    """Whole days from the local today to a ``YYYY-MM-DD...`` stamp."""
+    if not stamp or len(str(stamp)) < 10:
+        return 1
+    try:
+        target = datetime.strptime(str(stamp)[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return 1
+    if timezone_name and timezone_name != "auto":
+        try:
+            today = datetime.now(ZoneInfo(timezone_name)).date()
+        except Exception:
+            today = datetime.now(timezone.utc).date()
+    else:
+        today = datetime.now(timezone.utc).date()
+    return max(0, (target - today).days)
+
+
+def _call_weight(get_weight, source, metric, lead):
+    """Call a 3-arg weight function, or a 2-arg one used by older tests."""
+    try:
+        return get_weight(source, metric, lead)
+    except TypeError:
+        return get_weight(source, metric)
+
+
 def blend_hourly(results, get_weight, timezone_name="UTC", hours=48):
     """Bias-free weighted hourly series across sources that publish hours.
 
@@ -195,14 +222,15 @@ def blend_hourly(results, get_weight, timezone_name="UTC", hours=48):
         if result.get("role") == "observation":
             continue
         source = result.get("source")
-        weight = get_weight(source, "temp_high")
-        wind_weight = get_weight(source, "wind")
-        precip_weight = get_weight(source, "precip_mm")
-        cond_weight = get_weight(source, "condition")
         for hour in result.get("hourly") or []:
             key = hour.get("hour")
             if not key:
                 continue
+            lead = _lead_days_for_stamp(key, timezone_name)
+            weight = _call_weight(get_weight, source, "temp_high", lead)
+            wind_weight = _call_weight(get_weight, source, "wind", lead)
+            precip_weight = _call_weight(get_weight, source, "precip_mm", lead)
+            cond_weight = _call_weight(get_weight, source, "condition", lead)
             slot = by_hour.setdefault(key, {
                 "temps": [], "precips": [], "probs": [], "winds": [], "conds": [],
                 "sources": {},
@@ -303,14 +331,63 @@ def produce_forecast(city_name, location=None, forecast_days=7, respect_tiers=Tr
     sources_used = [r["source"] for r in results]
     num_sources = len(results)
 
-    # Default equal weights for sources not in the database
-    default_weight = 1.0 / num_sources
+    # City-specific database weights still win when that city has been scored.
+    # Otherwise use the SHMÚ skill table, and equal weights when it has no history.
+    default_weight = 1.0 / max(1, num_sources)
+    roles = {r["source"]: r.get("role", "forecast") for r in results}
+    forecast_sources = [name for name, role in roles.items() if role != "observation"] or sources_used
+    skill_table = load_table()
+    _weight_cache = {}
 
-    def get_weight(source_name, metric):
-        """Get weight for a source/metric, falling back to equal weight."""
+    def _skill_bundle(metric, lead_days):
+        variable = METRIC_TO_VARIABLE.get(metric)
+        key = (variable, int(lead_days) if lead_days is not None else 1)
+        if key not in _weight_cache:
+            if variable is None:
+                share = 1.0 / len(forecast_sources)
+                _weight_cache[key] = ({
+                    name: {"weight": share, "mae": None, "n": 0, "fallback": True, "basis": "equal"}
+                    for name in forecast_sources
+                }, "equal")
+            else:
+                _weight_cache[key] = resolve_weights(
+                    skill_table, forecast_sources, variable, lead_days,
+                )
+        return _weight_cache[key]
+
+    def get_weight(source_name, metric, lead_days=1):
+        """Weight for a source, variable and lead. Observations take one typical vote."""
         if source_name in weights and metric in weights[source_name]:
             return weights[source_name][metric]["weight"]
-        return default_weight
+        resolved, _scheme = _skill_bundle(metric, lead_days)
+        if roles.get(source_name) == "observation":
+            if not resolved:
+                return default_weight
+            return sum(row["weight"] for row in resolved.values()) / len(resolved)
+        row = resolved.get(source_name)
+        if row is None:
+            return default_weight
+        return row["weight"]
+
+    def skill_report(lead_days):
+        """Per-variable weights for the API, including sources on equal fallback."""
+        report = {}
+        scheme = "equal"
+        for metric, variable in METRIC_TO_VARIABLE.items():
+            resolved, this_scheme = _skill_bundle(metric, lead_days)
+            if this_scheme == "inverse_mae":
+                scheme = "inverse_mae"
+            report[variable] = {
+                name: {
+                    "weight": round(row["weight"], 4),
+                    "mae": row["mae"],
+                    "n": row["n"],
+                    "fallback": row["fallback"],
+                    "basis": row["basis"],
+                }
+                for name, row in resolved.items()
+            }
+        return scheme, report
 
     def get_bias(source_name, metric):
         """Get tracked bias for a source/metric. Returns 0.0 if unavailable."""
@@ -391,6 +468,13 @@ def produce_forecast(city_name, location=None, forecast_days=7, respect_tiers=Tr
 
     daily_forecast = []
     day_limit = max(1, min(int(forecast_days), 16))
+    if city.get("timezone") and city.get("timezone") != "auto":
+        try:
+            local_today = datetime.now(ZoneInfo(city["timezone"])).date()
+        except Exception:
+            local_today = datetime.now(timezone.utc).date()
+    else:
+        local_today = datetime.now(timezone.utc).date()
     for forecast_date in sorted(all_dates)[:day_limit]:
         day_data = {"date": forecast_date, "per_source": {}}
 
@@ -402,10 +486,14 @@ def produce_forecast(city_name, location=None, forecast_days=7, respect_tiers=Tr
                     source = r["source"]
                     day_data["per_source"][source] = d
 
-                    w_temp = get_weight(source, "temp_high")
-                    w_precip = get_weight(source, "precip_mm")
-                    w_wind = get_weight(source, "wind")
-                    w_cond = get_weight(source, "condition")
+                    try:
+                        lead_days = max(0, (datetime.strptime(forecast_date, "%Y-%m-%d").date() - local_today).days)
+                    except ValueError:
+                        lead_days = 1
+                    w_temp = get_weight(source, "temp_high", lead_days)
+                    w_precip = get_weight(source, "precip_mm", lead_days)
+                    w_wind = get_weight(source, "wind", lead_days)
+                    w_cond = get_weight(source, "condition", lead_days)
 
                     # Bias-correct per-source values before ensemble averaging
                     bias_temp_high = get_bias(source, "temp_high")
@@ -436,6 +524,16 @@ def produce_forecast(city_name, location=None, forecast_days=7, respect_tiers=Tr
         # Spread for this day
         high_vals = [v for v, _ in highs]
         day_data["high_spread_c"] = round(max(high_vals) - min(high_vals), 1) if len(high_vals) > 1 else 0
+        try:
+            day_lead = max(0, (datetime.strptime(forecast_date, "%Y-%m-%d").date() - local_today).days)
+        except ValueError:
+            day_lead = 1
+        day_scheme, day_weights = skill_report(day_lead)
+        day_data["skill_weights"] = {
+            "lead_days": day_lead,
+            "scheme": day_scheme,
+            "variables": day_weights,
+        }
 
         # Apply Layer 2 physics corrections to daily
         day_forecast = {
@@ -664,6 +762,13 @@ def produce_forecast(city_name, location=None, forecast_days=7, respect_tiers=Tr
         "source_status": source_status,
         "source_accuracy": source_info,
         "sea_temperature": sea_data,
+        "skill_weights": {
+            "scheme": skill_report(1)[0],
+            "min_samples": skill_table.get("min_samples", 7),
+            "reference": skill_table.get("reference"),
+            "lead_days": 1,
+            "variables": skill_report(1)[1],
+        },
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 

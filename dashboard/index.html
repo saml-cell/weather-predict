@@ -344,9 +344,14 @@
     function renderSources() {
       const data = state.forecast;
       const ids = ["ensemble"].concat((data.sources || []).filter((s) => s.status === "ok").map((s) => s.id));
+      const weightRows = (((data.weights || {}).variables || {}).temperature_max) || {};
       $("sources").innerHTML = ids.map((id) => {
         const pressed = state.source === id;
-        const label = id === "ensemble" ? "Ensemble" : id;
+        const row = weightRows[id];
+        let label = id === "ensemble" ? "Ensemble" : id;
+        if (row && row.weight != null && id !== "ensemble") {
+          label += ` ${Math.round(row.weight * 100)}%`;
+        }
         return `<button class="chip" type="button" data-source="${id}" aria-pressed="${pressed}">${label}</button>`;
       }).join("");
       $("sources").querySelectorAll("button").forEach((btn) => {
@@ -357,8 +362,12 @@
       });
       const reading = state.source === "ensemble" ? null : ((data.current || {}).sources || {})[state.source];
       const model = reading && reading.model ? ` · ${reading.model}` : "";
+      const scheme = (data.weights || {}).scheme;
+      const schemeText = scheme === "inverse_mae"
+        ? "Ensemble weights are inverse MAE against SHMÚ station observations. A source without enough history keeps an equal share."
+        : "Not enough SHMÚ history for this lead, so the ensemble is using equal weights.";
       $("source-note").textContent = state.source === "ensemble"
-        ? "Showing the weighted ensemble. Pick a source to compare its own numbers."
+        ? schemeText
         : `Showing ${state.source} only${model}.`;
     }
 

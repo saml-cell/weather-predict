@@ -1,0 +1,101 @@
+{
+  "min_samples": 7,
+  "epsilon": 0.1,
+  "reference": {
+    "station": {
+      "ind_kli": 11813,
+      "name": "Bratislava-Koliba",
+      "lat": 48.16822644,
+      "lon": 17.10718577
+    },
+    "climatology": "Validated daily climate 2026-01 through 2026-08, 21:00-21:00 temperature and 07:00-07:00 precipitation.",
+    "leads": "Open-Meteo previous_day1 and previous_day2/3 hourly temperature versus unvalidated SHMU minute samples at the matching local hour, last 8 complete days.",
+    "shmu_model": "ALADIN has no overlapping validated archive and fewer than 7 recent scored days, so it uses the equal-share fallback."
+  },
+  "variables": {
+    "temperature_max": {
+      "climatology": {
+        "Open-Meteo": {
+          "mae": 1.1852,
+          "n": 243
+        },
+        "ECMWF": {
+          "mae": 1.5251,
+          "n": 243
+        }
+      },
+      "1": {
+        "Open-Meteo": {
+          "mae": 1.0265,
+          "n": 8,
+          "n_hours": 181
+        },
+        "ECMWF": {
+          "mae": 1.3635,
+          "n": 8,
+          "n_hours": 181
+        }
+      },
+      "2-3": {
+        "Open-Meteo": {
+          "mae": 1.1519,
+          "n": 8,
+          "n_hours": 362
+        },
+        "ECMWF": {
+          "mae": 1.4348,
+          "n": 8,
+          "n_hours": 362
+        }
+      }
+    },
+    "temperature_min": {
+      "climatology": {
+        "Open-Meteo": {
+          "mae": 0.5605,
+          "n": 243
+        },
+        "ECMWF": {
+          "mae": 1.3412,
+          "n": 243
+        }
+      },
+      "1": {
+        "Open-Meteo": {
+          "mae": 1.0265,
+          "n": 8,
+          "n_hours": 181
+        },
+        "ECMWF": {
+          "mae": 1.3635,
+          "n": 8,
+          "n_hours": 181
+        }
+      },
+      "2-3": {
+        "Open-Meteo": {
+          "mae": 1.1519,
+          "n": 8,
+          "n_hours": 362
+        },
+        "ECMWF": {
+          "mae": 1.4348,
+          "n": 8,
+          "n_hours": 362
+        }
+      }
+    },
+    "precipitation": {
+      "climatology": {
+        "Open-Meteo": {
+          "mae": 1.8757,
+          "n": 103
+        },
+        "ECMWF": {
+          "mae": 1.9301,
+          "n": 103
+        }
+      }
+    }
+  }
+}
