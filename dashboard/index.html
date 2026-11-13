@@ -169,6 +169,15 @@
           <h2>Recent accuracy, Bratislava</h2>
           <div id="accuracy"><p class="status">Scores load from the latest backtest.</p></div>
         </section>
+        <section class="card" id="outlook-card">
+          <h2>Date outlook</h2>
+          <form id="outlook-form">
+            <input id="outlook-date" type="date" aria-label="Outlook date" required />
+            <button class="icon-btn" type="submit">Show</button>
+          </form>
+          <div id="outlook"><p class="status">Pick a date up to 180 days ahead.</p></div>
+          <div class="chart-box"><canvas id="outlook-chart" aria-label="Reliability and drift chart"></canvas></div>
+        </section>
       </div>
     </div>
     <footer id="footer">
@@ -482,11 +491,86 @@
       } catch (err) { /* accuracy is optional */ }
     }
 
+    const outlookDate = document.getElementById("outlook-date");
+    const soon = new Date();
+    soon.setDate(soon.getDate() + 21);
+    outlookDate.value = soon.toISOString().slice(0, 10);
+    let outlookChart = null;
+
+    function pct(value) {
+      if (value == null || Number.isNaN(Number(value))) return "—";
+      return `${Math.round(Number(value) * 100)}%`;
+    }
+
+    async function loadOutlook(event) {
+      if (event) event.preventDefault();
+      const params = new URLSearchParams(location.search);
+      const lat = params.get("lat") || "48.15";
+      const lon = params.get("lon") || "17.11";
+      const day = outlookDate.value;
+      const box = document.getElementById("outlook");
+      box.innerHTML = `<p class="status">Loading outlook…</p>`;
+      const [outlookRes, driftRes, skillRes] = await Promise.all([
+        fetch(`/api/v1/outlook?date=${day}&lat=${lat}&lon=${lon}`),
+        fetch(`/api/v1/forecast-drift?date=${day}&lat=${lat}&lon=${lon}`),
+        fetch("/api/v1/outlook/skill"),
+      ]);
+      const outlook = await outlookRes.json();
+      const drift = await driftRes.json();
+      if (!outlookRes.ok) {
+        box.innerHTML = `<p class="error">${outlook.error || "Outlook failed."}</p>`;
+        return;
+      }
+      const probs = outlook.probabilities || {};
+      const skill = outlook.skill || {};
+      box.innerHTML = `
+        <p><b>${outlook.date}</b> · lead ${outlook.lead_days} days · ${outlook.source}</p>
+        <p>${skill.message || ""}</p>
+        <div class="pills">
+          <span class="pill">Rain ${pct(probs.rain)}</span>
+          <span class="pill">Above 10° ${pct(probs.tmax_above_10c)}</span>
+          <span class="pill">Below 0° ${pct(probs.tmax_below_0c)}</span>
+          <span class="pill">Cool tercile ${pct(probs.tercile_below)}</span>
+          <span class="pill">Near ${pct(probs.tercile_near)}</span>
+          <span class="pill">Warm tercile ${pct(probs.tercile_above)}</span>
+          <span class="pill">Range ${probs.tmax_p10 ?? "—"}–${probs.tmax_p90 ?? "—"}°</span>
+          <span class="pill">Skill ${skill.label || "—"}</span>
+        </div>
+        <p class="status">${drift.available ? `In 7 days the forecast is expected near ${drift.predicted_forecast_tmax_c}° (now ${drift.today_forecast_tmax_c}°), band ${drift.uncertainty_low_c}–${drift.uncertainty_high_c}°. Chance it stays within 1.5°: ${pct(drift.probability_within_1_5c)}. Chance the rain call flips: ${pct(drift.probability_rain_call_flips)}. ${drift.reliability && drift.reliability.note ? drift.reliability.note : ""}` : (drift.message || "")}</p>`;
+      if (skillRes.ok && window.Chart) {
+        const skillBody = await skillRes.json();
+        const leads = skillBody.by_lead || {};
+        const labels = ["1-7", "8-14", "15-46", "47-180"];
+        const values = labels.map((key) => {
+          const row = leads[key] || {};
+          const score = row.crps_skill_score;
+          return score == null ? null : score;
+        });
+        if (outlookChart) outlookChart.destroy();
+        outlookChart = new Chart(document.getElementById("outlook-chart"), {
+          type: "bar",
+          data: { labels, datasets: [{ label: "CRPS skill vs climatology", data: values, backgroundColor: "#8ee7ff" }] },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            plugins: { legend: { labels: { color: "#93a4b5" } } },
+            scales: {
+              x: { ticks: { color: "#93a4b5" }, grid: { display: false } },
+              y: { ticks: { color: "#93a4b5" }, grid: { color: "rgba(255,255,255,0.06)" } }
+            }
+          }
+        });
+      }
+    }
+
+    document.getElementById("outlook-form").addEventListener("submit", loadOutlook);
+
     if ("serviceWorker" in navigator) {
       navigator.serviceWorker.register("/sw.js").catch(() => {});
     }
     loadForecast(paramsFromLocation());
     loadAccuracy();
+    loadOutlook();
   </script>
 </body>
 </html>
